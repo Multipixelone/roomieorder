@@ -1,0 +1,267 @@
+"""SQLite-backed queue + guard bookkeeping.
+
+The queue is the seam between the two halves of the app: intake inserts
+``pending`` rows and returns instantly; the worker drains them. All guard
+state (debounce, cooldown, daily spend, worker-pause) is derived from this one
+table plus a tiny key/value ``worker_state`` table, so there is a single source
+of truth and no cross-table drift.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Literal, Optional
+
+from pydantic import BaseModel
+
+# Terminal + transient statuses a queue row can hold. Mirrors the Sheets
+# `status` column (PLAN §3.5) plus the internal `pending`/`in_progress`.
+Status = Literal[
+    "pending",
+    "in_progress",
+    "placed",
+    "dry_run",
+    "skipped_cooldown",
+    "skipped_debounce",
+    "price_blocked",
+    "spend_capped",
+    "failed",
+    "challenge",
+]
+
+# Statuses that represent a real, completed money movement for spend accounting.
+SPEND_STATUSES = ("placed",)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _parse(ts: str) -> datetime:
+    dt = datetime.fromisoformat(ts)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+class QueueRow(BaseModel):
+    id: int
+    item_key: str
+    requester: str
+    status: Status
+    created_at: datetime
+    updated_at: datetime
+    attempts: int = 0
+    unit_price: Optional[float] = None
+    order_total: Optional[float] = None
+    order_id: Optional[str] = None
+    notes: str = ""
+
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS queue (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_key    TEXT    NOT NULL,
+    requester   TEXT    NOT NULL DEFAULT 'household',
+    status      TEXT    NOT NULL DEFAULT 'pending',
+    created_at  TEXT    NOT NULL,
+    updated_at  TEXT    NOT NULL,
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    unit_price  REAL,
+    order_total REAL,
+    order_id    TEXT,
+    notes       TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_queue_status  ON queue(status);
+CREATE INDEX IF NOT EXISTS idx_queue_item    ON queue(item_key, created_at);
+
+CREATE TABLE IF NOT EXISTS worker_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+
+
+class Store:
+    """Thin synchronous wrapper around the SQLite state file.
+
+    One connection per Store instance; the worker and the (async) intake both
+    run in the same process, so a single connection with the default
+    serialized threading is sufficient. SQLite handles the concurrency.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        # check_same_thread=False: uvicorn's threadpool may touch the same
+        # connection. SQLite is serialized by default, so this is safe here.
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA foreign_keys=ON")
+
+    # ─────────── schema ───────────
+
+    def init_db(self) -> None:
+        self._conn.executescript(_SCHEMA)
+        self._conn.commit()
+
+    def close(self) -> None:
+        self._conn.close()
+
+    # ─────────── enqueue / drain ───────────
+
+    def enqueue(self, item_key: str, requester: str = "household") -> int:
+        now = _iso(_utcnow())
+        cur = self._conn.execute(
+            "INSERT INTO queue (item_key, requester, status, created_at, updated_at) "
+            "VALUES (?, ?, 'pending', ?, ?)",
+            (item_key, requester, now, now),
+        )
+        self._conn.commit()
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    def claim_next_pending(self) -> Optional[QueueRow]:
+        """Atomically take the oldest pending row, flipping it to in_progress.
+
+        Returns None when the queue is empty. The UPDATE…RETURNING is a single
+        statement so two workers (or a restart mid-drain) can't claim the same
+        row twice.
+        """
+        cur = self._conn.execute(
+            """
+            UPDATE queue SET status='in_progress', updated_at=?, attempts=attempts+1
+            WHERE id = (
+                SELECT id FROM queue WHERE status='pending'
+                ORDER BY created_at ASC LIMIT 1
+            )
+            RETURNING *
+            """,
+            (_iso(_utcnow()),),
+        )
+        row = cur.fetchone()
+        self._conn.commit()
+        return self._to_row(row) if row else None
+
+    def mark(
+        self,
+        row_id: int,
+        status: Status,
+        *,
+        unit_price: Optional[float] = None,
+        order_total: Optional[float] = None,
+        order_id: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> None:
+        """Set a row's terminal status and any scraped fields.
+
+        Only non-None fields are written, so a price-block can record the
+        unit_price it tripped on without clobbering order columns.
+        """
+        sets = ["status=?", "updated_at=?"]
+        args: list[object] = [status, _iso(_utcnow())]
+        for col, val in (
+            ("unit_price", unit_price),
+            ("order_total", order_total),
+            ("order_id", order_id),
+            ("notes", notes),
+        ):
+            if val is not None:
+                sets.append(f"{col}=?")
+                args.append(val)
+        args.append(row_id)
+        self._conn.execute(f"UPDATE queue SET {', '.join(sets)} WHERE id=?", args)
+        self._conn.commit()
+
+    # ─────────── guard queries ───────────
+
+    def last_request_at(self, item_key: str) -> Optional[datetime]:
+        """Most recent *enqueue* time for an item_key (debounce check)."""
+        row = self._conn.execute(
+            "SELECT created_at FROM queue WHERE item_key=? ORDER BY created_at DESC LIMIT 1",
+            (item_key,),
+        ).fetchone()
+        return _parse(row["created_at"]) if row else None
+
+    def last_placed_at(self, item_key: str) -> Optional[datetime]:
+        """Most recent successfully *placed* order time (cooldown check)."""
+        row = self._conn.execute(
+            "SELECT updated_at FROM queue WHERE item_key=? AND status='placed' "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (item_key,),
+        ).fetchone()
+        return _parse(row["updated_at"]) if row else None
+
+    def spend_since(self, hours: float = 24.0) -> float:
+        """Sum of order_total for placed orders in the trailing window."""
+        cutoff = _iso(_utcnow() - timedelta(hours=hours))
+        placeholders = ",".join("?" for _ in SPEND_STATUSES)
+        row = self._conn.execute(
+            f"SELECT COALESCE(SUM(order_total), 0.0) AS total FROM queue "
+            f"WHERE status IN ({placeholders}) AND updated_at >= ? "
+            f"AND order_total IS NOT NULL",
+            (*SPEND_STATUSES, cutoff),
+        ).fetchone()
+        return float(row["total"])
+
+    def list_queue(self, limit: int = 20) -> list[QueueRow]:
+        rows = self._conn.execute(
+            "SELECT * FROM queue ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [self._to_row(r) for r in rows]
+
+    def pending_count(self) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM queue WHERE status='pending'"
+        ).fetchone()
+        return int(row["n"])
+
+    # ─────────── worker pause ───────────
+
+    def set_paused(self, paused: bool, reason: str = "") -> None:
+        self._conn.execute(
+            "INSERT INTO worker_state (key, value) VALUES ('paused', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            ("1" if paused else "0",),
+        )
+        self._conn.execute(
+            "INSERT INTO worker_state (key, value) VALUES ('pause_reason', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (reason,),
+        )
+        self._conn.commit()
+
+    def is_paused(self) -> bool:
+        row = self._conn.execute(
+            "SELECT value FROM worker_state WHERE key='paused'"
+        ).fetchone()
+        return bool(row and row["value"] == "1")
+
+    def pause_reason(self) -> str:
+        row = self._conn.execute(
+            "SELECT value FROM worker_state WHERE key='pause_reason'"
+        ).fetchone()
+        return row["value"] if row else ""
+
+    # ─────────── internals ───────────
+
+    @staticmethod
+    def _to_row(row: sqlite3.Row) -> QueueRow:
+        return QueueRow(
+            id=row["id"],
+            item_key=row["item_key"],
+            requester=row["requester"],
+            status=row["status"],
+            created_at=_parse(row["created_at"]),
+            updated_at=_parse(row["updated_at"]),
+            attempts=row["attempts"],
+            unit_price=row["unit_price"],
+            order_total=row["order_total"],
+            order_id=row["order_id"],
+            notes=row["notes"] or "",
+        )
