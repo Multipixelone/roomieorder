@@ -1,0 +1,29 @@
+{
+  "paper_towels": {
+    "title": "Bounty Quick-Size Paper Towels, 12 Family Rolls",
+    "asin": "B07YYYYYYY",
+    "url": "https://www.amazon.com/dp/B07YYYYYYY",
+    "qty": 1,
+    "expected_price": 24.99,
+    "price_ceiling": 32.00,
+    "cooldown_days": 10
+  },
+  "toilet_paper": {
+    "title": "Charmin Ultra Soft, 18 Mega Rolls",
+    "asin": "B07ZZZZZZZ",
+    "url": "https://www.amazon.com/dp/B07ZZZZZZZ",
+    "qty": 1,
+    "expected_price": 27.99,
+    "price_ceiling": 36.00,
+    "cooldown_days": 14
+  },
+  "dish_soap": {
+    "title": "Dawn Ultra Dishwashing Liquid, 3-Pack",
+    "asin": "B07WWWWWWW",
+    "url": "https://www.amazon.com/dp/B07WWWWWWW",
+    "qty": 1,
+    "expected_price": 11.99,
+    "price_ceiling": 16.00,
+    "cooldown_days": 21
+  }
+}

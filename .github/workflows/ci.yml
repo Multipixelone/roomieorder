@@ -1,0 +1,65 @@
+name: CI
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "ci-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  python-checks:
+    name: pytest, ruff, mypy
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          extra-conf: |
+            accept-flake-config = true
+
+      - name: Run tests
+        run: nix develop . --command pytest -q
+
+      - name: Lint
+        run: nix develop . --command ruff check .
+
+      - name: Type check
+        run: nix develop . --command mypy src
+
+  build:
+    name: check, build, push
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Nix and Attic
+        uses: ./.github/actions/setup-nix-attic
+        with:
+          attic-key: ${{ secrets.ATTIC_KEY }}
+
+      - name: nix flake check
+        run: nix flake check --print-build-logs
+
+      - name: Build default package
+        run: nix build .#packages.x86_64-linux.default --print-build-logs
+
+      - name: Push closure to Attic
+        if: |
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false) ||
+          github.event_name == 'workflow_dispatch'
+        run: attic push system ./result
