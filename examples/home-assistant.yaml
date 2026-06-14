@@ -1,0 +1,62 @@
+# Home Assistant wiring for roomieorder (PLAN §3.1).
+#
+# 1. Put the rest_command + scripts below into configuration.yaml (or a
+#    package). Point the URL at wherever `roomieorder serve` listens —
+#    localhost:8723 if HA runs on the same box, otherwise the host's IP.
+# 2. Add the button card (bottom) to a dashboard.
+#
+# The dashboard only ever sends an item_key. Everything money-related (ASIN,
+# price ceiling, cooldown) lives in catalog.json on the roomieorder side, so a
+# misconfigured button can't order the wrong thing or override a guard.
+
+rest_command:
+  roomieorder_reorder:
+    url: "http://localhost:8723/reorder"
+    method: POST
+    content_type: "application/json"
+    payload: '{"item_key": "{{ item_key }}", "requester": "{{ requester | default(''household'') }}"}'
+    # 200 even for guard rejections (cooldown/debounce) — those are expected,
+    # not errors.
+    verify_ssl: false
+
+script:
+  order_paper_towels:
+    alias: Order paper towels
+    sequence:
+      - service: rest_command.roomieorder_reorder
+        data:
+          item_key: paper_towels
+
+  order_toilet_paper:
+    alias: Order toilet paper
+    sequence:
+      - service: rest_command.roomieorder_reorder
+        data:
+          item_key: toilet_paper
+
+  order_dish_soap:
+    alias: Order dish soap
+    sequence:
+      - service: rest_command.roomieorder_reorder
+        data:
+          item_key: dish_soap
+
+# ─────────── Dashboard card ───────────
+# Lovelace (YAML mode) — a grid of one button per staple.
+#
+# type: grid
+# columns: 2
+# square: false
+# cards:
+#   - type: button
+#     name: Paper Towels
+#     icon: mdi:paper-roll
+#     tap_action: { action: perform-action, perform_action: script.order_paper_towels }
+#   - type: button
+#     name: Toilet Paper
+#     icon: mdi:toilet
+#     tap_action: { action: perform-action, perform_action: script.order_toilet_paper }
+#   - type: button
+#     name: Dish Soap
+#     icon: mdi:bottle-tonic
+#     tap_action: { action: perform-action, perform_action: script.order_dish_soap }
