@@ -212,7 +212,27 @@ never maintain a second list.
 | `restCommand` | `{ roomieorder_reorder = {…}; }` | `services.home-assistant.config.rest_command` |
 | `scripts` | list of `{ id; alias; sequence; }` | infra's **`iotHass.nixScripts`** |
 | `scriptsAttrs` | `{ "order_<key>" = {…}; }` | upstream `config.script` (don't use here — conflicts with `script ui: !include`) |
-| `dashboardCard` | a `type: grid` of buttons | any Lovelace view |
+| `sensors` | a `rest:` list (one fetch, one sensor per item) | `services.home-assistant.config.rest` |
+| `dashboardCard` | a `type: grid` of plain buttons | any Lovelace view |
+| `dashboardCardDynamic` | same grid, but each item grays out while on cooldown | any Lovelace view (needs `sensors` wired) |
+
+Two optional args control the status side: `pollSeconds` (default `30`, how
+often the sensors re-poll `GET /items`) and `statusSensorPrefix` (default
+`roomieorder_`, so item `paper_towels` → `sensor.roomieorder_paper_towels`).
+
+**Gray-out behavior.** `sensors` polls the service's `GET /items`, which reports
+per-item `last_placed_at`, `cooldown_days`, and an `on_cooldown` flag (true while
+the item is inside its catalog `cooldown_days` window of the last *placed* order).
+`dashboardCardDynamic` reads `sensor.<prefix><key>`'s `on_cooldown` attribute:
+while it's true the button is swapped for a grayed-out card naming when it was
+last ordered, so an item that was bought recently can't be re-ordered (the intake
+cooldown guard would reject it anyway, §5). It's two stacked `conditional` cards
+per item — pure core, no HACS/`custom:button-card`.
+
+> **Only placed orders gray a button.** `on_cooldown` is computed from the last
+> `placed` row, exactly like the cooldown guard. In `dryRun` mode orders land as
+> `dry_run`, not `placed`, so **nothing grays out until you go live** (§4). Items
+> with `cooldown_days: 0` never gray (no cooldown).
 
 This repo's HA host routes Nix scripts through `iotHass.nixScripts` (separate
 from UI-managed `scripts.yaml`), so use `.scripts`, not `scriptsAttrs`:
@@ -231,8 +251,13 @@ from UI-managed `scripts.yaml`), so use `.scripts`, not `scriptsAttrs`:
       };
     in
     {
-      # rest_command is plain config (no include-split needed).
-      services.home-assistant.config.rest_command = buttons.restCommand;
+      # rest_command + the status sensors are plain config (no include-split).
+      services.home-assistant.config = {
+        rest_command = buttons.restCommand;
+        # Per-item status sensors for the gray-out. `rest` is a top-level list,
+        # so this merges with any other `rest:` sensors the host already has.
+        rest = buttons.sensors;
+      };
 
       # Scripts go through the repo's Nix-script include, generated per item.
       iotHass.nixScripts = buttons.scripts;
@@ -240,24 +265,41 @@ from UI-managed `scripts.yaml`), so use `.scripts`, not `scriptsAttrs`:
 }
 ```
 
+The firewall rule in §2 already opens 8723 from `iot` to `link` for `/reorder`;
+the status sensors hit `GET /items` on that **same** port, so no extra hole.
+
 Add `./roomieorder.nix` to the iot imports and rebuild iot. Because the flake
 input is pinned, the buttons only change when you bump the roomieorder input
 *and* `catalog.json` differs — deterministic.
 
 ### The dashboard buttons
 
-`buttons.dashboardCard` is a ready `type: grid` of one button per item (uses the
-optional `button`/`icon` fields from `catalog.json`, falling back to the title
-and `mdi:cart`). Drop it into whichever Lovelace view you keep:
+Two grids are on offer. `buttons.dashboardCard` is a plain `type: grid` of one
+button per item. `buttons.dashboardCardDynamic` is the same grid but each item
+grays out and shows when it was last ordered while inside its cooldown window —
+**use this one** for the requested behavior (it needs `buttons.sensors` wired
+into `config.rest`, above). Both use the optional `button`/`icon` fields from
+`catalog.json`, falling back to the title and `mdi:cart`. Drop one into whichever
+Lovelace view you keep:
 
-- **If dashboards are UI-managed** (storage mode): either add the grid by hand
-  in the UI (`tap_action: perform-action → script.order_<item>`), or have a
-  Claude with the **ha-mcp** server push it live via `ha_config_set_dashboard`.
-- **If a dashboard is Nix-managed**: splice `buttons.dashboardCard` into that
-  view's `cards`. (The standalone `nixosModules.homeAssistant` can also set a
-  whole "Reorder" view via `lovelaceConfig` with `dashboard = true`, but that
-  forces the *default* dashboard to YAML mode — don't enable it if you edit
-  dashboards in the UI.)
+- **If dashboards are UI-managed** (storage mode): the `conditional`/`markdown`
+  cards in `dashboardCardDynamic` are all core types, so paste the rendered YAML
+  into the UI's raw-config editor, or have a Claude with the **ha-mcp** server
+  push it live via `ha_config_set_dashboard`. (Plain taps still work if you'd
+  rather hand-place `dashboardCard`'s buttons → `script.order_<item>`.)
+- **If a dashboard is Nix-managed**: splice `buttons.dashboardCardDynamic` into
+  that view's `cards`. (The standalone `nixosModules.homeAssistant` can also set
+  a whole "Reorder" view via `lovelaceConfig` with `dashboard = true` — it now
+  emits the dynamic grid and the sensors automatically — but that forces the
+  *default* dashboard to YAML mode, so don't enable it if you edit dashboards in
+  the UI.)
+
+> The gray-out is driven entirely by the service's `GET /items`. If the sensors
+> read `unavailable`, the `conditional` falls through to the active button (taps
+> still work) — a poll failure degrades to the plain grid, it doesn't lock you
+> out. Tune freshness with `pollSeconds`; it can't be more current than one poll
+> interval, so a 30 s poll means a tapped button may stay live for up to 30 s
+> before it grays.
 
 Other HA setups (not this repo) that use the upstream `config.script` path can
 skip `lib.haButtons` and just enable the turnkey module:
@@ -311,7 +353,7 @@ CLI reference (all on `link`, env from the same file): `serve`, `init-db`,
 - [ ] `nix-secrets`: `roomieorder/env.age` (+ `secrets.nix` entry); optional `gcp.age`, `catalog.json`
 - [ ] `infra`: `modules/link/roomieorder.nix` + import + regenerate flake input
 - [ ] `infra`: firewall opens 8723 from iot to link
-- [ ] `infra`: `modules/iot/roomieorder.nix` — `lib.haButtons` → `rest_command` + `iotHass.nixScripts` (generated from catalog); splice `dashboardCard` into a view
+- [ ] `infra`: `modules/iot/roomieorder.nix` — `lib.haButtons` → `rest_command` + `rest` (status sensors) + `iotHass.nixScripts` (generated from catalog); splice `dashboardCardDynamic` into a view for the grayed-out buttons
 - [ ] Deploy link + iot
 - [ ] Manual bring-up §4 (Amazon login, dry-run each item, one real buy)
 - [ ] Replace placeholder ASINs in the catalog with real ones

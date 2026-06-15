@@ -11,7 +11,15 @@
 let
   cfg = config.services.roomieorder.homeAssistant;
   buttons = import ./ha-buttons.nix {
-    inherit (cfg) catalogFile endpoint requester restCommandName defaultIcon;
+    inherit (cfg)
+      catalogFile
+      endpoint
+      requester
+      restCommandName
+      defaultIcon
+      pollSeconds
+      statusSensorPrefix
+      ;
   };
 in
 {
@@ -47,6 +55,18 @@ in
       description = "mdi icon used for items whose catalog entry sets no icon.";
     };
 
+    pollSeconds = lib.mkOption {
+      type = lib.types.int;
+      default = 30;
+      description = "How often the status sensors re-poll GET /items.";
+    };
+
+    statusSensorPrefix = lib.mkOption {
+      type = lib.types.str;
+      default = "roomieorder_";
+      description = "Entity-id prefix for the per-item status sensors (sensor.<prefix><key>).";
+    };
+
     dashboard = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -64,6 +84,9 @@ in
     services.home-assistant.config = {
       rest_command = buttons.restCommand;
       script = buttons.scriptsAttrs;
+      # Per-item status sensors so the buttons can gray out inside the cooldown
+      # window. `rest` is a top-level list; merges with any other rest sensors.
+      rest = buttons.sensors;
     };
 
     services.home-assistant.lovelaceConfig = lib.mkIf cfg.dashboard {
@@ -73,7 +96,7 @@ in
           title = "Reorder";
           path = "reorder";
           icon = "mdi:cart";
-          cards = [ buttons.dashboardCard ];
+          cards = [ buttons.dashboardCardDynamic ];
         }
       ];
     };

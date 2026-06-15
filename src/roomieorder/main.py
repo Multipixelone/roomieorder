@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -42,6 +43,24 @@ _PAUSE_STATUSES = {"challenge", "failed", "spend_capped"}
 class ReorderRequest(BaseModel):
     item_key: str
     requester: str = "household"
+
+
+class ItemStatus(BaseModel):
+    """Per-item state for the dashboard (`GET /items`).
+
+    The HA buttons poll this to gray themselves out: while ``on_cooldown`` is
+    true, the item was ordered inside its ``cooldown_days`` window, so a button
+    can show when it was last ordered and refuse further taps instead of
+    enqueuing a buy the intake guard would only reject (PLAN §5).
+    """
+
+    item_key: str
+    title: str
+    # Most recent *placed* order — the "last ordered" time the cooldown keys off.
+    last_placed_at: Optional[datetime] = None
+    cooldown_days: int = 0
+    on_cooldown: bool = False
+    cooldown_until: Optional[datetime] = None
 
 
 class Engine:
@@ -123,6 +142,38 @@ class Engine:
             self.store.set_paused(True, result.message)
             _logger.warning("worker paused: %s", result.message)
 
+    # ─────────── dashboard state ───────────
+
+    def item_statuses(self, *, now: Optional[datetime] = None) -> dict[str, ItemStatus]:
+        """Per-item cooldown snapshot for the HA dashboard (`GET /items`).
+
+        Mirrors the cooldown arm of :func:`guards.check_intake` — keep the two
+        in sync. Catalog is tiny, so a couple of indexed lookups per item is
+        cheap enough to compute on every poll. Only *placed* orders arm the
+        cooldown, so nothing grays out while ``dry_run`` is on (PLAN §4).
+        """
+        current = now or datetime.now(timezone.utc)
+        out: dict[str, ItemStatus] = {}
+        for key in sorted(self.catalog):
+            item = self.catalog[key]
+            last_placed = self.store.last_placed_at(key)
+            cooldown_until: Optional[datetime] = None
+            on_cooldown = False
+            if last_placed is not None and item.cooldown_days > 0:
+                unlock = last_placed + timedelta(days=item.cooldown_days)
+                if current < unlock:
+                    on_cooldown = True
+                    cooldown_until = unlock
+            out[key] = ItemStatus(
+                item_key=key,
+                title=item.title,
+                last_placed_at=last_placed,
+                cooldown_days=item.cooldown_days,
+                on_cooldown=on_cooldown,
+                cooldown_until=cooldown_until,
+            )
+        return out
+
     def _log_sheet(self, row: QueueRow, item, result: PurchaseResult) -> None:  # type: ignore[no-untyped-def]
         self.sheets.append(
             {
@@ -167,6 +218,13 @@ def create_app(config: Optional[Config] = None) -> FastAPI:
             "pending": engine.store.pending_count(),
             "items": sorted(engine.catalog),
         }
+
+    @app.get("/items")
+    def items() -> dict[str, dict[str, object]]:
+        # Keyed by item_key (same shape as catalog.json) so an HA `rest:` sensor
+        # can pull one item with `value_json['<key>']` — see PLAN-ROOMIE.md §3.
+        engine: Engine = app.state.engine
+        return {k: v.model_dump(mode="json") for k, v in engine.item_statuses().items()}
 
     @app.get("/queue")
     def queue(limit: int = 20) -> list[dict[str, object]]:

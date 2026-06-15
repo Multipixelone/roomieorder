@@ -46,22 +46,52 @@ script:
         data:
           item_key: dish_soap
 
+# ─────────── Status sensors (gray-out source) ───────────
+# One REST poll of GET /items feeds a sensor per item. The `on_cooldown`
+# attribute is what the dashboard buttons read to gray themselves out; the state
+# is the last *placed* order timestamp so a card can show "ordered N days ago".
+# `/items` is keyed by item_key, so each sensor pulls just its own item out of
+# the payload. (Only placed orders arm the cooldown — nothing grays while the
+# service runs in DRY_RUN.)
+
+rest:
+  - resource: "http://localhost:8723/items"
+    method: GET
+    scan_interval: 30
+    sensor:
+      - name: roomieorder_paper_towels
+        unique_id: roomieorder_paper_towels
+        device_class: timestamp
+        value_template: "{{ value_json['paper_towels']['last_placed_at'] }}"
+        json_attributes_path: "$['paper_towels']"
+        json_attributes: [title, on_cooldown, cooldown_until, cooldown_days, last_placed_at]
+      # …one sensor per catalog item (toilet_paper, dish_soap, …).
+
 # ─────────── Dashboard card ───────────
-# Lovelace (YAML mode) — a grid of one button per staple.
+# Lovelace (YAML mode) — a grid of one button per staple. Each item is a pair of
+# `conditional` cards (no HACS): the active button when it's outside its cooldown
+# window, a grayed-out "last ordered" note while it's inside it.
 #
 # type: grid
 # columns: 2
 # square: false
 # cards:
-#   - type: button
-#     name: Paper Towels
-#     icon: mdi:paper-roll
-#     tap_action: { action: perform-action, perform_action: script.order_paper_towels }
-#   - type: button
-#     name: Toilet Paper
-#     icon: mdi:toilet
-#     tap_action: { action: perform-action, perform_action: script.order_toilet_paper }
-#   - type: button
-#     name: Dish Soap
-#     icon: mdi:bottle-tonic
-#     tap_action: { action: perform-action, perform_action: script.order_dish_soap }
+#   - type: conditional
+#     conditions:
+#       - condition: template
+#         value_template: "{{ not is_state_attr('sensor.roomieorder_paper_towels', 'on_cooldown', true) }}"
+#     card:
+#       type: button
+#       name: Paper Towels
+#       icon: mdi:paper-roll
+#       tap_action: { action: perform-action, perform_action: script.order_paper_towels }
+#   - type: conditional
+#     conditions:
+#       - condition: template
+#         value_template: "{{ is_state_attr('sensor.roomieorder_paper_towels', 'on_cooldown', true) }}"
+#     card:
+#       type: markdown
+#       content: |
+#         <ha-icon icon="mdi:paper-roll"></ha-icon> **Paper Towels**
+#         <br>⏳ ordered {{ relative_time(as_datetime(states('sensor.roomieorder_paper_towels'))) }} ago
+#   # …repeat the pair for toilet_paper, dish_soap, …

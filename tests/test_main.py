@@ -91,6 +91,29 @@ def test_reorder_debounced(client: TestClient) -> None:
     assert body["status"] == "skipped_debounce"
 
 
+def test_items_reports_cooldown(client: TestClient) -> None:
+    engine = client.app.state.engine  # type: ignore[attr-defined]
+
+    # Nothing ordered yet → nothing on cooldown.
+    before = client.get("/items").json()
+    assert before["paper_towels"]["on_cooldown"] is False
+    assert before["paper_towels"]["last_placed_at"] is None
+    assert before["paper_towels"]["cooldown_days"] == 10
+
+    # A *placed* order arms paper_towels' 10-day cooldown.
+    rid = engine.store.enqueue("paper_towels")
+    engine.store.mark(rid, "placed", order_total=24.99)
+    after = client.get("/items").json()
+    assert after["paper_towels"]["on_cooldown"] is True
+    assert after["paper_towels"]["last_placed_at"] is not None
+    assert after["paper_towels"]["cooldown_until"] is not None
+
+    # dish_soap has cooldown_days=0 → never grays, even after a placed order.
+    rid2 = engine.store.enqueue("dish_soap")
+    engine.store.mark(rid2, "placed", order_total=11.99)
+    assert client.get("/items").json()["dish_soap"]["on_cooldown"] is False
+
+
 def test_worker_pauses_on_challenge(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
     monkeypatch.setattr("roomieorder.main.AmazonPurchaser", FakePurchaser)

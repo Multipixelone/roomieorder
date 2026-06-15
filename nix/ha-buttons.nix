@@ -15,7 +15,14 @@
 #                   upstream `config.script` attrset; see scriptsAttrs)
 #   scriptsAttrs  → the same scripts as { "order_<key>" = { ... }; } for
 #                   `services.home-assistant.config.script`
-#   dashboardCard → a `type: grid` of button cards, drop into any Lovelace view
+#   sensors       → a `rest:` integration list (one fetch, one sensor per item)
+#                   that polls `GET /items`, for services.home-assistant.config.rest.
+#                   Each item gets sensor.<statusSensorPrefix><key> with an
+#                   `on_cooldown` attribute the buttons read to gray out.
+#   dashboardCard        → a `type: grid` of plain button cards (no live state)
+#   dashboardCardDynamic → the same grid, but each item grays out and shows when
+#                   it was last ordered while inside its `cooldown_days` window.
+#                   Needs `sensors` wired into config.rest (above).
 #
 # Example:
 #   buttons = inputs.roomieorder.lib.haButtons {
@@ -34,10 +41,18 @@
   restCommandName ? "roomieorder_reorder",
   # Fallback mdi icon when an item has no `icon`.
   defaultIcon ? "mdi:cart",
+  # How often (seconds) the status sensors re-poll `GET /items`.
+  pollSeconds ? 30,
+  # Entity-id prefix for the per-item status sensors (sensor.<prefix><key>).
+  statusSensorPrefix ? "roomieorder_",
 }:
 let
   catalog = builtins.fromJSON (builtins.readFile catalogFile);
   keys = builtins.attrNames catalog;
+
+  nameFor = key: if (catalog.${key}.button or "") != "" then catalog.${key}.button else catalog.${key}.title;
+  iconFor = key: if (catalog.${key}.icon or "") != "" then catalog.${key}.icon else defaultIcon;
+  statusEntity = key: "sensor.${statusSensorPrefix}${key}";
 
   scriptFor = key: {
     id = "order_${key}";
@@ -55,13 +70,63 @@ let
 
   buttonFor = key: {
     type = "button";
-    name = if (catalog.${key}.button or "") != "" then catalog.${key}.button else catalog.${key}.title;
-    icon = if (catalog.${key}.icon or "") != "" then catalog.${key}.icon else defaultIcon;
+    name = nameFor key;
+    icon = iconFor key;
     tap_action = {
       action = "perform-action";
       perform_action = "script.order_${key}";
     };
   };
+
+  # The per-item status sensor (one `rest:` sensor entry). State is the last
+  # *placed* order timestamp; `on_cooldown` is the boolean the dynamic buttons
+  # gate on.
+  sensorFor = key: {
+    name = "${statusSensorPrefix}${key}";
+    unique_id = "${statusSensorPrefix}${key}";
+    device_class = "timestamp";
+    # `/items` is keyed by item_key, so pull this one item out of the payload.
+    value_template = "{{ value_json['${key}']['last_placed_at'] }}";
+    json_attributes_path = "$['${key}']";
+    json_attributes = [
+      "title"
+      "on_cooldown"
+      "cooldown_until"
+      "cooldown_days"
+      "last_placed_at"
+    ];
+  };
+
+  # An item inside its cooldown swaps its button for a grayed-out card naming
+  # when it was last ordered. Two `conditional` cards (no HACS): one renders.
+  dynCardsFor = key: [
+    {
+      type = "conditional";
+      conditions = [
+        {
+          condition = "template";
+          value_template = "{{ not is_state_attr('${statusEntity key}', 'on_cooldown', true) }}";
+        }
+      ];
+      card = buttonFor key;
+    }
+    {
+      type = "conditional";
+      conditions = [
+        {
+          condition = "template";
+          value_template = "{{ is_state_attr('${statusEntity key}', 'on_cooldown', true) }}";
+        }
+      ];
+      card = {
+        type = "markdown";
+        content = ''
+          <ha-icon icon="${iconFor key}"></ha-icon> **${nameFor key}**
+          <br>⏳ ordered {{ relative_time(as_datetime(states('${statusEntity key}'))) }} ago
+        '';
+      };
+    }
+  ];
 in
 {
   restCommand.${restCommandName} = {
@@ -81,10 +146,26 @@ in
     }) keys
   );
 
+  sensors = [
+    {
+      resource = "${endpoint}/items";
+      method = "GET";
+      scan_interval = pollSeconds;
+      sensor = map sensorFor keys;
+    }
+  ];
+
   dashboardCard = {
     type = "grid";
     columns = 2;
     square = false;
     cards = map buttonFor keys;
+  };
+
+  dashboardCardDynamic = {
+    type = "grid";
+    columns = 2;
+    square = false;
+    cards = builtins.concatLists (map dynCardsFor keys);
   };
 }
