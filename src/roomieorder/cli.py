@@ -7,6 +7,7 @@ Subcommands:
 * ``catalog``     — print the catalog.
 * ``queue``       — show recent queue rows.
 * ``test-notify`` — emit a test message via the configured notifier.
+* ``login``        — open the profile headed to sign into Amazon by hand.
 * ``dry-run KEY`` — drive one item to its review page and screenshot, no order.
 * ``resume`` / ``pause`` / ``status`` — manage the worker-pause flag.
 """
@@ -110,6 +111,31 @@ def test_notify(message: str) -> None:
     ok = notifier.send(message)
     click.echo("sent" if ok else "FAILED — check OPENCLAW_* env and the openclaw binary")
     raise SystemExit(0 if ok else 1)
+
+
+@main.command()
+def login() -> None:
+    """Open the Amazon profile in a real browser so you can sign in by hand.
+
+    roomieorder never stores an Amazon credential — the session lives in the
+    persistent Chromium profile (``profile_dir``). Run this once; later
+    ``dry-run`` / live orders reuse the saved cookies. Disable 2FA on the
+    account first: the automated buy flow halts on any login challenge.
+    """
+    from roomieorder.purchase import AmazonPurchaser
+
+    config = load_config()
+    purchaser = AmazonPurchaser(config)
+
+    def wait_for_operator(page: object) -> None:
+        click.echo(f"opened {config.amazon_domain} on profile {config.profile_dir}")
+        click.pause(info="log in, then press any key here to save the session and close…")
+        if purchaser.is_logged_in(page):
+            click.echo("✓ signed in — session saved to the profile")
+        else:
+            click.echo("⚠️  still looks signed out — re-run `roomieorder login` if needed")
+
+    purchaser.login(wait_for_operator)
 
 
 @main.command(name="dry-run")

@@ -5,7 +5,8 @@ This is the brittle half (PLAN §1, §3.4). Everything here is written to fail
 timeout per step, a screenshot on every failure, and explicit challenge
 detection that halts rather than looping into a CAPTCHA.
 
-The operator logs into Amazon by hand once into ``profile_dir``; with no 2FA
+The operator logs into Amazon by hand once into ``profile_dir`` (see
+:meth:`AmazonPurchaser.login`, exposed as ``roomieorder login``); with no 2FA
 the session persists. Nothing here stores an Amazon credential — the login
 lives entirely in the browser profile.
 
@@ -277,7 +278,51 @@ class AmazonPurchaser:
             finally:
                 context.close()
 
+    def login(self, wait_for_operator: Callable[[object], None]) -> None:
+        """Open the persistent profile headed so the operator can sign into
+        Amazon by hand. Cookies persist in ``profile_dir``; roomieorder never
+        stores an Amazon credential of its own (PLAN §1).
+
+        ``wait_for_operator(page)`` is invoked once the Amazon home page has
+        loaded and must *block* until the human is done — the context (and the
+        saved session with it) is torn down as soon as it returns.
+        """
+        from playwright.sync_api import sync_playwright
+
+        self.config.profile_dir.mkdir(parents=True, exist_ok=True)
+        with sync_playwright() as pw:
+            context = pw.chromium.launch_persistent_context(
+                user_data_dir=str(self.config.profile_dir),
+                headless=False,
+                args=self._launch_args(),
+            )
+            page = context.pages[0] if context.pages else context.new_page()
+            try:
+                page.goto(
+                    f"https://www.{self.config.amazon_domain}",
+                    wait_until="domcontentloaded",
+                )
+                wait_for_operator(page)
+            finally:
+                context.close()
+
     # ─────────── page helpers ───────────
+
+    def is_logged_in(self, page: object) -> bool:
+        """Best-effort sign-in check: Amazon's account nav reads
+        'Hello, sign in' when logged out and 'Hello, <name>' otherwise. Returns
+        False if the nav can't be read, so a True is trustworthy but a False
+        may be a miss."""
+        for sel in ("#nav-link-accountList-nav-line-1", "#nav-link-accountList"):
+            try:
+                loc = page.locator(sel).first  # type: ignore[attr-defined]
+                if loc.count() == 0:
+                    continue
+                text = loc.inner_text(timeout=2_000)
+            except Exception:  # noqa: BLE001 — try the next candidate
+                continue
+            return "sign in" not in text.lower()
+        return False
 
     def _read_price(self, page: object) -> Optional[float]:
         for sel in _PRICE_SELECTORS:
