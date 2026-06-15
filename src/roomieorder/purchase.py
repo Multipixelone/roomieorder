@@ -164,7 +164,21 @@ class AmazonPurchaser:
         config.shots_dir.mkdir(parents=True, exist_ok=True)
 
     def _launch_args(self) -> list[str]:
-        args: list[str] = []
+        # The worker runs unattended from a systemd service, so its headed
+        # Chromium window is never presented/foregrounded — it opens occluded
+        # (which is also why no window appears for an HA-triggered buy). For a
+        # backgrounded window Chromium throttles requestAnimationFrame and
+        # background timers to a crawl, so Amazon's JS never hydrates the
+        # "Secure checkout" body: the page stays a bare header bar, the Place
+        # Your Order button never enters the DOM, and the buy fails on a blank
+        # page. These flags make a headed-but-occluded window keep rendering at
+        # full speed, so the checkout hydrates the same as it does for an
+        # interactive `roomieorder dry-run` (visible window, no throttling).
+        args: list[str] = [
+            "--disable-backgrounding-occluded-windows",
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+        ]
         if self.config.wayland:
             # XWayland usually handles headed Chromium, but force native
             # Wayland when asked (PLAN §4 "Headed + display").
@@ -197,6 +211,13 @@ class AmazonPurchaser:
             )
             context.set_default_timeout(_STEP_TIMEOUT_MS)
             page = context.pages[0] if context.pages else context.new_page()
+            # Mark this tab active so Chromium un-throttles its renderer even
+            # when the OS window is occluded (see _launch_args). Belt-and-braces
+            # with the launch flags; best-effort, never fatal.
+            try:
+                page.bring_to_front()
+            except Exception:  # noqa: BLE001 — purely an optimisation
+                pass
             try:
                 page.goto(url, wait_until="domcontentloaded")
 
