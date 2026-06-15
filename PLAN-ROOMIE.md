@@ -87,6 +87,16 @@ one into the infra repo and reference it, or keep it in `nix-secrets`
 (`roomieorder/catalog.json`, plaintext). The placeholder catalog in the app
 repo has **fake ASINs** — it must be replaced with real ones before going live.
 
+> **⚠️ Single source — point both consumers at the *same* file.** The catalog
+> is read in two places: the **service** on `link`
+> (`services.roomieorder.catalogFile`, §2) and the **HA button generator** on
+> `iot` (`lib.haButtons { catalogFile = …; }`, §3). Use one identical path for
+> both — `${inputs.secrets}/roomieorder/catalog.json` is the natural choice
+> since both hosts already have `inputs.secrets`. If they diverge, the buttons
+> and the items the service knows about drift apart (a tapped button 404s, or a
+> stocked item has no button). Define the path once (e.g. a `let` binding or a
+> small shared module) if you want the compiler to enforce it.
+
 ---
 
 ## 2. infra module — `modules/link/roomieorder.nix`
