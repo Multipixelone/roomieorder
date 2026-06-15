@@ -95,3 +95,25 @@ NixOS module eval). 45 tests pass.
   isn't reliably specifier-expanded.
 - PLAN.md reconciled with the as-built code (name, OpenClaw-only notify,
   env+catalog config, real layout, phase status).
+
+## HA buttons generated from catalog.json (single source of truth)
+
+No more maintaining two lists. The catalog now drives the Home Assistant config:
+
+- **`nix/ha-buttons.nix`** → flake `lib.haButtons { catalogFile; endpoint; }`,
+  a pure builtins-only function returning `restCommand`, `scripts` (list of
+  `{id; alias; sequence;}` matching infra's `iotHass.nixScripts`), `scriptsAttrs`
+  (upstream `config.script` shape), and a `dashboardCard` button grid.
+- **`nix/ha-module.nix`** → `nixosModules.homeAssistant`, a turnkey
+  `services.roomieorder.homeAssistant` for HA hosts on the upstream
+  `config.script` path (optional generated "Reorder" dashboard).
+- Catalog gained optional `button` (short label) + `icon` (mdi) fields, used
+  only by the generator; the buy flow ignores them.
+- Flake `checks.ha-buttons` guards the generator invariants (one script + one
+  button per item, well-formed ids) in CI.
+- `examples/home-assistant.yaml` + PLAN-ROOMIE §3 rewritten: the YAML is now a
+  reference of generated output; the infra glue calls `lib.haButtons` and feeds
+  `iotHass.nixScripts`.
+- Verified: `nix flake check` green (package, ha-buttons check, all three
+  nixosModules incl. homeAssistant), generator eval matches catalog, 45 tests +
+  ruff + mypy still clean.

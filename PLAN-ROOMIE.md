@@ -187,60 +187,80 @@ in `flake.nix` + `flake.lock`.
 
 ---
 
-## 3. Home Assistant buttons — `iot` host
+## 3. Home Assistant buttons — `iot` host (generated from `catalog.json`)
 
-HA is Nix-managed (`services.home-assistant.config`), so add the buttons
-declaratively. The reference YAML is `examples/home-assistant.yaml` in the app
-repo; the Nix translation:
+**Do not hand-write a button list.** The roomieorder flake exposes
+`lib.haButtons`, a pure function that turns `catalog.json` into the HA
+`rest_command`, the per-item scripts, and a Lovelace button grid. `catalog.json`
+is the single source of truth — add a staple there and its button appears; you
+never maintain a second list.
+
+`lib.haButtons { catalogFile; endpoint; }` returns:
+
+| field | shape | feed into |
+|---|---|---|
+| `restCommand` | `{ roomieorder_reorder = {…}; }` | `services.home-assistant.config.rest_command` |
+| `scripts` | list of `{ id; alias; sequence; }` | infra's **`iotHass.nixScripts`** |
+| `scriptsAttrs` | `{ "order_<key>" = {…}; }` | upstream `config.script` (don't use here — conflicts with `script ui: !include`) |
+| `dashboardCard` | a `type: grid` of buttons | any Lovelace view |
+
+This repo's HA host routes Nix scripts through `iotHass.nixScripts` (separate
+from UI-managed `scripts.yaml`), so use `.scripts`, not `scriptsAttrs`:
 
 ```nix
-# modules/iot/roomieorder.nix (new), or fold into an existing iot module.
+# modules/iot/roomieorder.nix (new)
+{ inputs, ... }:
 {
-  configurations.nixos.iot.module = { ... }: {
-    services.home-assistant.config = {
-      rest_command.roomieorder_reorder = {
-        url = "http://192.168.6.6:8723/reorder";   # link's LAN addr
-        method = "POST";
-        content_type = "application/json";
-        payload = ''{"item_key": "{{ item_key }}"}'';
+  configurations.nixos.iot.module =
+    { ... }:
+    let
+      buttons = inputs.roomieorder.lib.haButtons {
+        catalogFile = "${inputs.secrets}/roomieorder/catalog.json"; # same file the service loads
+        endpoint = "http://192.168.6.6:8723";                       # link's LAN addr
+        # requester defaults to "household"
       };
+    in
+    {
+      # rest_command is plain config (no include-split needed).
+      services.home-assistant.config.rest_command = buttons.restCommand;
 
-      script = {
-        order_paper_towels.sequence = [{
-          action = "rest_command.roomieorder_reorder";
-          data.item_key = "paper_towels";
-        }];
-        order_toilet_paper.sequence = [{
-          action = "rest_command.roomieorder_reorder";
-          data.item_key = "toilet_paper";
-        }];
-        order_dish_soap.sequence = [{
-          action = "rest_command.roomieorder_reorder";
-          data.item_key = "dish_soap";
-        }];
-      };
+      # Scripts go through the repo's Nix-script include, generated per item.
+      iotHass.nixScripts = buttons.scripts;
     };
-  };
 }
 ```
 
-Keep one `script.order_<item>` per catalog `item_key`. Add the `<iot-module>` to
-the iot imports and rebuild iot.
+Add `./roomieorder.nix` to the iot imports and rebuild iot. Because the flake
+input is pinned, the buttons only change when you bump the roomieorder input
+*and* `catalog.json` differs — deterministic.
 
 ### The dashboard buttons
 
-The `rest_command` + `script` above are the functional half. The visible
-**buttons** are a Lovelace card. Two ways, pick whichever matches how this repo
-manages dashboards:
+`buttons.dashboardCard` is a ready `type: grid` of one button per item (uses the
+optional `button`/`icon` fields from `catalog.json`, falling back to the title
+and `mdi:cart`). Drop it into whichever Lovelace view you keep:
 
-1. **HA UI (simplest):** Edit dashboard → add a **Grid** of **Button** cards,
-   one per script, `tap_action: perform-action → script.order_<item>`. The
-   button-grid YAML is at the bottom of `examples/home-assistant.yaml`.
-2. **Declarative / MCP:** if dashboards are managed in Nix
-   (`services.home-assistant.config` `lovelace` / a dashboards file) add the
-   grid card there. A Claude with the **ha-mcp** server can also create the
-   scripts and dashboard live via `ha_config_set_script` and
-   `ha_config_set_dashboard` — useful to prototype before committing the Nix.
+- **If dashboards are UI-managed** (storage mode): either add the grid by hand
+  in the UI (`tap_action: perform-action → script.order_<item>`), or have a
+  Claude with the **ha-mcp** server push it live via `ha_config_set_dashboard`.
+- **If a dashboard is Nix-managed**: splice `buttons.dashboardCard` into that
+  view's `cards`. (The standalone `nixosModules.homeAssistant` can also set a
+  whole "Reorder" view via `lovelaceConfig` with `dashboard = true`, but that
+  forces the *default* dashboard to YAML mode — don't enable it if you edit
+  dashboards in the UI.)
+
+Other HA setups (not this repo) that use the upstream `config.script` path can
+skip `lib.haButtons` and just enable the turnkey module:
+
+```nix
+imports = [ inputs.roomieorder.nixosModules.homeAssistant ];
+services.roomieorder.homeAssistant = {
+  enable = true;
+  catalogFile = ./catalog.json;
+  endpoint = "http://192.168.6.6:8723";
+  dashboard = true; # optional: a generated "Reorder" view
+};
+```
 
 No per-roommate attribution: every tap logs as `household` (the default
 `requester`). Decided out of scope.
@@ -281,7 +301,7 @@ CLI reference (all on `link`, env from the same file): `serve`, `init-db`,
 - [ ] `nix-secrets`: `roomieorder/env.age` (+ `secrets.nix` entry); optional `gcp.age`, `catalog.json`
 - [ ] `infra`: `modules/link/roomieorder.nix` + import + regenerate flake input
 - [ ] `infra`: firewall opens 8723 from iot to link
-- [ ] `infra`: `modules/iot/…` rest_command + scripts; dashboard buttons
+- [ ] `infra`: `modules/iot/roomieorder.nix` — `lib.haButtons` → `rest_command` + `iotHass.nixScripts` (generated from catalog); splice `dashboardCard` into a view
 - [ ] Deploy link + iot
 - [ ] Manual bring-up §4 (Amazon login, dry-run each item, one real buy)
 - [ ] Replace placeholder ASINs in the catalog with real ones

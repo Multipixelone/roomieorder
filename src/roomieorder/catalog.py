@@ -23,6 +23,10 @@ class CatalogItem(BaseModel):
     url: str = ""
     qty: int = Field(default=1, ge=1, le=10)
     expected_price: float = Field(ge=0.0)
+    # Presentation-only, consumed by the Nix `lib.haButtons` generator to build
+    # the Home Assistant dashboard button. Ignored by the buy flow.
+    button: str = ""  # short label for the HA button (falls back to title)
+    icon: str = ""  # mdi icon for the HA button (falls back to a default)
     # Abort + alert if the live price exceeds this — guards against a spike or
     # a hijacked listing. Must be >= expected_price (validated below).
     price_ceiling: float = Field(ge=0.0)

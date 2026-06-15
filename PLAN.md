@@ -77,9 +77,14 @@ script:
 ```
 
 Dashboard: a grid of `button` cards, one per script. Everything logs as
-`household` (no per-roommate attribution — decided out of scope). Full example
-in [`examples/home-assistant.yaml`](./examples/home-assistant.yaml); the
-cross-host Nix wiring is in [`PLAN-ROOMIE.md`](./PLAN-ROOMIE.md) §3.
+`household` (no per-roommate attribution — decided out of scope).
+
+**The buttons are generated from `catalog.json`, not hand-maintained.** The
+flake exposes `lib.haButtons { catalogFile; endpoint; }`, which derives the
+`rest_command`, one script per item, and the button grid from the catalog —
+single source of truth. Reference output in
+[`examples/home-assistant.yaml`](./examples/home-assistant.yaml); the cross-host
+Nix wiring is in [`PLAN-ROOMIE.md`](./PLAN-ROOMIE.md) §3.
 
 ### 3.2 Item catalog — `catalog.json`
 The "kind I like" lives here. You populate the ASINs once.

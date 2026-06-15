@@ -1,4 +1,9 @@
-# Home Assistant wiring for roomieorder (PLAN §3.1).
+# Home Assistant wiring for roomieorder (PLAN §3.1) — REFERENCE SHAPE ONLY.
+#
+# You don't hand-write this. The flake's `lib.haButtons { catalogFile; endpoint; }`
+# generates the rest_command, one script per catalog item, and the button grid
+# from catalog.json — single source of truth (see PLAN-ROOMIE.md §3). This file
+# shows what that output looks like, for readers not using Nix.
 #
 # 1. Put the rest_command + scripts below into configuration.yaml (or a
 #    package). Point the URL at wherever `roomieorder serve` listens —

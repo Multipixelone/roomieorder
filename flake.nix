@@ -70,6 +70,28 @@
 
         checks = {
           inherit pre-commit-check;
+
+          # Guard the catalog → HA generator: one script + one button per item,
+          # rest_command present, every script id well-formed. Runs in
+          # `nix flake check` (CI), so a catalog or generator change that breaks
+          # the shape fails the build.
+          ha-buttons =
+            let
+              b = import ./nix/ha-buttons.nix {
+                catalogFile = ./catalog.json;
+                endpoint = "http://example:8723";
+              };
+              n = builtins.length (builtins.attrNames (builtins.fromJSON (builtins.readFile ./catalog.json)));
+              ok =
+                (builtins.length b.scripts == n)
+                && (b.restCommand ? roomieorder_reorder)
+                && (builtins.length b.dashboardCard.cards == n)
+                && (builtins.all (s: builtins.substring 0 6 s.id == "order_") b.scripts);
+            in
+            if ok then
+              pkgs.runCommand "ha-buttons-check" { } "touch $out"
+            else
+              throw "ha-buttons: generated scripts/cards don't match catalog.json";
         };
 
         devShells.default = pkgs.mkShell {
@@ -88,6 +110,13 @@
     // {
       nixosModules.default = import ./nix/module.nix;
       nixosModules.roomieorder = import ./nix/module.nix;
+      # Turnkey HA buttons generated from catalog.json (upstream config.script
+      # path). For custom script plumbing, use lib.haButtons below instead.
+      nixosModules.homeAssistant = import ./nix/ha-module.nix;
+
+      # Pure, system-independent: catalog.json → HA config fragments
+      # (rest_command, scripts, dashboard card). Single source of truth.
+      lib.haButtons = import ./nix/ha-buttons.nix;
 
       overlays.default = final: prev: {
         roomieorder = final.callPackage ./nix/package.nix { };
