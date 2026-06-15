@@ -63,21 +63,21 @@ NixOS module eval). 45 tests pass.
   nixpkgs browsers; secrets via `environmentFile`; state under `%S/roomieorder`.
   Verified by evaluating it inside a minimal NixOS system.
 - CI (already present, mirrors commutecop): pytest/ruff/mypy + `nix flake
-  check` + Attic push.
+check` + Attic push.
 - **examples/home-assistant.yaml** — `rest_command` + per-staple scripts +
   button-grid card (PLAN §3.1).
 
 ## What's left for the operator (PLAN §8 — needs hands-on / secrets)
 
-- [ ] Create a Google service account, share the Sheet with its email; set
-  `GOOGLE_SERVICE_ACCOUNT_JSON` + `ROOMIEORDER_SHEET_ID`.
-- [ ] Create/reuse an OpenClaw Telegram target; set `OPENCLAW_TARGET`.
+- [x] Create a Google service account, share the Sheet with its email; set
+      `GOOGLE_SERVICE_ACCOUNT_JSON` + `ROOMIEORDER_SHEET_ID`.
+- [x] Create/reuse an OpenClaw Telegram target; set `OPENCLAW_TARGET`.
 - [ ] Populate `catalog.json` with real ASINs + price ceilings (current
-  entries are placeholders with fake ASINs).
+      entries are placeholders with fake ASINs).
 - [ ] Launch the Chromium profile once, log into Amazon, confirm default
-  address + 1-tap payment.
+      address + 1-tap payment.
 - [ ] `roomieorder dry-run <item>` for each staple until it reaches the review
-  page, *then* flip `DRY_RUN=false` for one cheap item.
+      page, _then_ flip `DRY_RUN=false` for one cheap item.
 
 ## infra handoff
 
