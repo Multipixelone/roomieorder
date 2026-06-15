@@ -262,7 +262,7 @@ class AmazonPurchaser:
                 # we arrive. Wait for it before clicking; otherwise _click_first
                 # races a blank "Secure checkout" body and pauses spuriously.
                 self._wait_for_any(page, _PLACE_ORDER_SELECTORS)
-                if not self._click_first(page, _PLACE_ORDER_SELECTORS):
+                if not self._place_order(page):
                     # A slow render, a sign-in wall, or a challenge can all land
                     # us here with no button. Re-check the latter two so the
                     # operator gets the right next step, not a misleading
@@ -275,7 +275,10 @@ class AmazonPurchaser:
                     return PurchaseResult(
                         status="failed",
                         unit_price=price,
-                        message="reached checkout but couldn't find Place Your Order",
+                        message=(
+                            "reached checkout but couldn't find Place Your Order "
+                            f"({self._page_debug(page)})"
+                        ),
                         screenshot=shot,
                     )
 
@@ -396,6 +399,37 @@ class AmazonPurchaser:
             return True
         except Exception:  # noqa: BLE001
             return False
+
+    def _place_order(self, page: object) -> bool:
+        """Click Place Your Order; fall back to the button's text.
+
+        The CSS ids drift between Amazon's checkout variants (thin Buy-Now
+        flow vs. the full review page), so a missed id reads as "couldn't find
+        Place Your Order" even when the button is right there. The visible text
+        is far more stable, so try a role/text match before giving up — same
+        belt-and-suspenders approach as ``_start_checkout``'s checkout link."""
+        if self._click_first(page, _PLACE_ORDER_SELECTORS):
+            return True
+        try:
+            page.get_by_role(  # type: ignore[attr-defined]
+                "button", name=re.compile("place your order", re.I)
+            ).first.click(timeout=5_000)
+            return True
+        except Exception:  # noqa: BLE001 — no text match either; caller fails
+            return False
+
+    def _page_debug(self, page: object) -> str:
+        """A short 'url · title' tag for failure messages, so the operator can
+        tell what page the worker actually reached without a screenshot."""
+        try:
+            url = page.url  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            url = "?"
+        try:
+            title = page.title(timeout=2_000)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            title = "?"
+        return f"{url} · {title}".strip(" ·")
 
     def _wait_for_any(
         self, page: object, selectors: tuple[str, ...], timeout: int = _STEP_TIMEOUT_MS

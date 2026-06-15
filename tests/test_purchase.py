@@ -71,19 +71,43 @@ class _FakeLocator:
         self._page.clicked.append(self._selector)
 
 
+class _RoleLocator:
+    """Stand-in for a ``get_by_role`` result. Clicks if ``hit`` is True,
+    otherwise raises like Playwright does when nothing matches."""
+
+    def __init__(self, page: "_FakePage", hit: bool) -> None:
+        self._page = page
+        self._hit = hit
+
+    @property
+    def first(self) -> "_RoleLocator":
+        return self
+
+    def click(self, timeout: int | None = None) -> None:
+        if not self._hit:
+            raise TimeoutError("no role match")
+        self._page.clicked.append("role:place your order")
+
+
 class _FakePage:
     """Minimal stand-in for a Playwright page that models the checkout race:
     the place-order button is absent until ``wait_for_selector`` is awaited,
     mimicking Amazon's JS rendering the body after navigation."""
 
-    def __init__(self, reveal_on_wait: set[str] | None = None) -> None:
+    def __init__(
+        self, reveal_on_wait: set[str] | None = None, role_text: bool = False
+    ) -> None:
         self.present: set[str] = set()
         self._reveal = reveal_on_wait or set()
+        self._role_text = role_text
         self.clicked: list[str] = []
         self.waited: list[str] = []
 
     def locator(self, selector: str) -> _FakeLocator:
         return _FakeLocator(self, selector)
+
+    def get_by_role(self, role: str, name: object = None) -> _RoleLocator:
+        return _RoleLocator(self, self._role_text)
 
     def wait_for_selector(self, selector: str, timeout: int | None = None) -> None:
         self.waited.append(selector)
@@ -109,6 +133,20 @@ def test_wait_for_any_lets_the_click_land(config: Config) -> None:
     assert purchaser._wait_for_any(page, _PLACE_ORDER_SELECTORS) is True
     assert purchaser._click_first(page, _PLACE_ORDER_SELECTORS) is True
     assert page.clicked == [_PLACE_ORDER_SELECTORS[0]]
+
+
+def test_place_order_falls_back_to_button_text(config: Config) -> None:
+    # None of the CSS ids match (a checkout variant), but the button text does.
+    page = _FakePage(role_text=True)
+    assert _purchaser(config)._place_order(page) is True
+    assert page.clicked == ["role:place your order"]
+
+
+def test_place_order_fails_when_nothing_matches(config: Config) -> None:
+    # No id and no text match — the worker should report the miss, not click.
+    page = _FakePage(role_text=False)
+    assert _purchaser(config)._place_order(page) is False
+    assert page.clicked == []
 
 
 def test_wait_for_any_returns_false_on_timeout(config: Config) -> None:
