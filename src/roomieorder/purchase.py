@@ -206,6 +206,10 @@ class AmazonPurchaser:
                     return self._challenge(page, item_key, "product")
 
                 # ── price + guards ──
+                # Same JS-hydration race as checkout: the price block can paint
+                # after domcontentloaded, so wait for it before reading or a
+                # live product reads as "no price".
+                self._wait_for_any(page, _PRICE_SELECTORS)
                 price = self._read_price(page)
                 if price is None:
                     shot = self._screenshot(page, item_key, "no_price")
@@ -253,7 +257,20 @@ class AmazonPurchaser:
                     )
 
                 # ── place the order ──
+                # Amazon renders the checkout body via JS *after*
+                # domcontentloaded, so the button isn't in the DOM the instant
+                # we arrive. Wait for it before clicking; otherwise _click_first
+                # races a blank "Secure checkout" body and pauses spuriously.
+                self._wait_for_any(page, _PLACE_ORDER_SELECTORS)
                 if not self._click_first(page, _PLACE_ORDER_SELECTORS):
+                    # A slow render, a sign-in wall, or a challenge can all land
+                    # us here with no button. Re-check the latter two so the
+                    # operator gets the right next step, not a misleading
+                    # "couldn't find Place Your Order".
+                    if self._is_signin(page):
+                        return self._signin_required(page, item_key, "checkout")
+                    if self._is_challenge(page):
+                        return self._challenge(page, item_key, "checkout")
                     shot = self._screenshot(page, item_key, "no_place_order")
                     return PurchaseResult(
                         status="failed",
@@ -378,6 +395,21 @@ class AmazonPurchaser:
             )
             return True
         except Exception:  # noqa: BLE001
+            return False
+
+    def _wait_for_any(
+        self, page: object, selectors: tuple[str, ...], timeout: int = _STEP_TIMEOUT_MS
+    ) -> bool:
+        """Block until any of ``selectors`` is visible, then return True.
+
+        ``_click_first`` decides via an instantaneous ``count()`` snapshot, so a
+        control that Amazon renders with JS *after* navigation reads as absent
+        and the click is skipped. This gives that JS time to paint. Returns
+        False on timeout (the caller decides how to fail) rather than raising."""
+        try:
+            page.wait_for_selector(", ".join(selectors), timeout=timeout)  # type: ignore[attr-defined]
+            return True
+        except Exception:  # noqa: BLE001 — caller handles the miss
             return False
 
     def _click_first(self, page: object, selectors: tuple[str, ...]) -> bool:

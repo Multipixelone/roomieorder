@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from roomieorder.purchase import looks_like_challenge, looks_like_signin, parse_price
+from roomieorder.config import Config
+from roomieorder.purchase import (
+    _PLACE_ORDER_SELECTORS,
+    AmazonPurchaser,
+    looks_like_challenge,
+    looks_like_signin,
+    parse_price,
+)
 
 
 @pytest.mark.parametrize(
@@ -46,3 +53,67 @@ def test_looks_like_challenge(text: str, url: str, expected: bool) -> None:
 )
 def test_looks_like_signin(text: str, url: str, expected: bool) -> None:
     assert looks_like_signin(text, url) is expected
+
+
+class _FakeLocator:
+    def __init__(self, page: "_FakePage", selector: str) -> None:
+        self._page = page
+        self._selector = selector
+
+    @property
+    def first(self) -> "_FakeLocator":
+        return self
+
+    def count(self) -> int:
+        return 1 if self._selector in self._page.present else 0
+
+    def click(self, timeout: int | None = None) -> None:
+        self._page.clicked.append(self._selector)
+
+
+class _FakePage:
+    """Minimal stand-in for a Playwright page that models the checkout race:
+    the place-order button is absent until ``wait_for_selector`` is awaited,
+    mimicking Amazon's JS rendering the body after navigation."""
+
+    def __init__(self, reveal_on_wait: set[str] | None = None) -> None:
+        self.present: set[str] = set()
+        self._reveal = reveal_on_wait or set()
+        self.clicked: list[str] = []
+        self.waited: list[str] = []
+
+    def locator(self, selector: str) -> _FakeLocator:
+        return _FakeLocator(self, selector)
+
+    def wait_for_selector(self, selector: str, timeout: int | None = None) -> None:
+        self.waited.append(selector)
+        self.present |= self._reveal
+
+
+def _purchaser(config: Config) -> AmazonPurchaser:
+    return AmazonPurchaser(config)
+
+
+def test_click_first_misses_unrendered_button(config: Config) -> None:
+    # Blank body: none of the place-order selectors are in the DOM yet.
+    page = _FakePage()
+    assert _purchaser(config)._click_first(page, _PLACE_ORDER_SELECTORS) is False
+
+
+def test_wait_for_any_lets_the_click_land(config: Config) -> None:
+    # The first selector appears only once the page is given time to render.
+    page = _FakePage(reveal_on_wait={_PLACE_ORDER_SELECTORS[0]})
+    purchaser = _purchaser(config)
+
+    assert purchaser._click_first(page, _PLACE_ORDER_SELECTORS) is False
+    assert purchaser._wait_for_any(page, _PLACE_ORDER_SELECTORS) is True
+    assert purchaser._click_first(page, _PLACE_ORDER_SELECTORS) is True
+    assert page.clicked == [_PLACE_ORDER_SELECTORS[0]]
+
+
+def test_wait_for_any_returns_false_on_timeout(config: Config) -> None:
+    class _NeverPage(_FakePage):
+        def wait_for_selector(self, selector: str, timeout: int | None = None) -> None:
+            raise TimeoutError("no selector")
+
+    assert _purchaser(config)._wait_for_any(_NeverPage(), _PLACE_ORDER_SELECTORS) is False
