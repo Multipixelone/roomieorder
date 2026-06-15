@@ -27,6 +27,7 @@ class CatalogItem(BaseModel):
     # the Home Assistant dashboard button. Ignored by the buy flow.
     button: str = ""  # short label for the HA button (falls back to title)
     icon: str = ""  # mdi icon for the HA button (falls back to a default)
+    category: str = ""  # groups/sorts items on the generated HA dashboard
     # Abort + alert if the live price exceeds this — guards against a spike or
     # a hijacked listing. Must be >= expected_price (validated below).
     price_ceiling: float = Field(ge=0.0)

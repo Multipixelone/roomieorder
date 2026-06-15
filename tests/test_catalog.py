@@ -13,6 +13,26 @@ def test_load_ok(catalog_path: Path) -> None:
     assert set(cat) == {"paper_towels", "dish_soap"}
     assert cat["paper_towels"].asin == "B07ABCDEFG"
     assert cat["dish_soap"].qty == 2
+    # category is presentation-only and defaults to "" when absent.
+    assert cat["paper_towels"].category == ""
+
+
+def test_category_roundtrips(tmp_path: Path) -> None:
+    p = tmp_path / "c.json"
+    p.write_text(
+        json.dumps(
+            {
+                "x": {
+                    "title": "t",
+                    "asin": "B07ABCDEFG",
+                    "expected_price": 1,
+                    "price_ceiling": 2,
+                    "category": "Kitchen",
+                }
+            }
+        )
+    )
+    assert load_catalog(p)["x"].category == "Kitchen"
 
 
 def test_missing_file(tmp_path: Path) -> None:

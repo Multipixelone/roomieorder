@@ -19,6 +19,7 @@ let
       defaultIcon
       pollSeconds
       statusSensorPrefix
+      dashboardColumns
       ;
   };
 in
@@ -67,14 +68,21 @@ in
       description = "Entity-id prefix for the per-item status sensors (sensor.<prefix><key>).";
     };
 
+    dashboardColumns = lib.mkOption {
+      type = lib.types.int;
+      default = 2;
+      description = "Cards per row in the generated Reorder grid.";
+    };
+
     dashboard = lib.mkOption {
       type = lib.types.bool;
       default = false;
       description = ''
         When true, set services.home-assistant.lovelaceConfig to a single
-        "Reorder" view holding the generated button grid. This forces the
-        default dashboard into YAML mode (disables UI editing of it), so leave
-        it false if you manage dashboards in the UI and instead drop
+        "Reorder" view holding the generated button grid. The dynamic grid uses
+        Mushroom cards, so the HACS `mushroom` frontend must be installed. This
+        forces the default dashboard into YAML mode (disables UI editing of it),
+        so leave it false if you manage dashboards in the UI and instead drop
         `lib.haButtons {...}.dashboardCard` into a view yourself.
       '';
     };

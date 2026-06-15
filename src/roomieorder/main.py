@@ -56,6 +56,8 @@ class ItemStatus(BaseModel):
 
     item_key: str
     title: str
+    # Presentation-only, mirrors the catalog field — lets a dashboard group/sort.
+    category: str = ""
     # Most recent *placed* order — the "last ordered" time the cooldown keys off.
     last_placed_at: Optional[datetime] = None
     cooldown_days: int = 0
@@ -167,6 +169,7 @@ class Engine:
             out[key] = ItemStatus(
                 item_key=key,
                 title=item.title,
+                category=item.category,
                 last_placed_at=last_placed,
                 cooldown_days=item.cooldown_days,
                 on_cooldown=on_cooldown,

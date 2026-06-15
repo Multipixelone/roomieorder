@@ -19,10 +19,14 @@
 #                   that polls `GET /items`, for services.home-assistant.config.rest.
 #                   Each item gets sensor.<statusSensorPrefix><key> with an
 #                   `on_cooldown` attribute the buttons read to gray out.
-#   dashboardCard        → a `type: grid` of plain button cards (no live state)
-#   dashboardCardDynamic → the same grid, but each item grays out and shows when
-#                   it was last ordered while inside its `cooldown_days` window.
-#                   Needs `sensors` wired into config.rest (above).
+#   dashboardCard        → a `type: grid` of plain (core) button cards, no live
+#                   state — the HACS-free option.
+#   dashboardCardDynamic → a grid of `custom:mushroom-template-card`s (HACS
+#                   `mushroom` REQUIRED) that gray out and show when each item
+#                   was last ordered inside its `cooldown_days` window. Needs
+#                   `sensors` wired into config.rest (above). When catalog items
+#                   set a `category`, cards are grouped under a heading per
+#                   category. Card count per row is `dashboardColumns`.
 #
 # Example:
 #   buttons = inputs.roomieorder.lib.haButtons {
@@ -45,6 +49,8 @@
   pollSeconds ? 30,
   # Entity-id prefix for the per-item status sensors (sensor.<prefix><key>).
   statusSensorPrefix ? "roomieorder_",
+  # Cards per row in the generated dashboard grids (the `grid` card `columns`).
+  dashboardColumns ? 2,
 }:
 let
   catalog = builtins.fromJSON (builtins.readFile catalogFile);
@@ -52,7 +58,20 @@ let
 
   nameFor = key: if (catalog.${key}.button or "") != "" then catalog.${key}.button else catalog.${key}.title;
   iconFor = key: if (catalog.${key}.icon or "") != "" then catalog.${key}.icon else defaultIcon;
+  categoryFor = key: catalog.${key}.category or "";
   statusEntity = key: "sensor.${statusSensorPrefix}${key}";
+
+  # Items in stable display order: by name (the button label), so a category's
+  # cards read alphabetically regardless of item_key.
+  sortedKeys = builtins.sort (a: b: nameFor a < nameFor b) keys;
+
+  # Ordered, de-duplicated category list (sorted; the empty "" group, if any,
+  # sorts first and is labelled "Other" below).
+  orderedCategories = builtins.foldl' (
+    acc: c: if builtins.elem c acc then acc else acc ++ [ c ]
+  ) [ ] (builtins.sort (a: b: a < b) (map categoryFor keys));
+  hasCategories = builtins.any (c: c != "") orderedCategories;
+  keysInCategory = cat: builtins.filter (key: categoryFor key == cat) sortedKeys;
 
   scriptFor = key: {
     id = "order_${key}";
@@ -90,6 +109,7 @@ let
     json_attributes_path = "$['${key}']";
     json_attributes = [
       "title"
+      "category"
       "on_cooldown"
       "cooldown_until"
       "cooldown_days"
@@ -97,36 +117,36 @@ let
     ];
   };
 
-  # An item inside its cooldown swaps its button for a grayed-out card naming
-  # when it was last ordered. Two `conditional` cards (no HACS): one renders.
-  dynCardsFor = key: [
-    {
-      type = "conditional";
-      conditions = [
-        {
-          condition = "template";
-          value_template = "{{ not is_state_attr('${statusEntity key}', 'on_cooldown', true) }}";
-        }
-      ];
-      card = buttonFor key;
-    }
-    {
-      type = "conditional";
-      conditions = [
-        {
-          condition = "template";
-          value_template = "{{ is_state_attr('${statusEntity key}', 'on_cooldown', true) }}";
-        }
-      ];
-      card = {
-        type = "markdown";
-        content = ''
-          <ha-icon icon="${iconFor key}"></ha-icon> **${nameFor key}**
-          <br>⏳ ordered {{ relative_time(as_datetime(states('${statusEntity key}'))) }} ago
-        '';
-      };
-    }
-  ];
+  # One Mushroom card per item (HACS `mushroom`). Outside its cooldown it's a
+  # teal tappable button; inside it grays out (`disabled`) and the secondary
+  # line names when it was last ordered. A single card — no `conditional` swap.
+  mushroomCardFor = key: {
+    type = "custom:mushroom-template-card";
+    primary = nameFor key;
+    icon = iconFor key;
+    fill_container = true;
+    icon_color = "{% if is_state_attr('${statusEntity key}', 'on_cooldown', true) %}disabled{% else %}teal{% endif %}";
+    secondary = "{% set s = states('${statusEntity key}') %}{% if is_state_attr('${statusEntity key}', 'on_cooldown', true) and s not in ['unknown', 'unavailable', ''] %}{{ relative_time(as_datetime(s)) }} ago{% endif %}";
+    tap_action = {
+      action = "perform-action";
+      perform_action = "script.order_${key}";
+    };
+  };
+
+  # A `grid` card of Mushroom buttons for the given keys.
+  mushroomGrid = ks: {
+    type = "grid";
+    columns = dashboardColumns;
+    square = false;
+    cards = map mushroomCardFor ks;
+  };
+
+  # A markdown heading (portable across view types, unlike the `heading` card
+  # which only renders in sections views).
+  headingCard = label: {
+    type = "markdown";
+    content = "## ${label}";
+  };
 in
 {
   restCommand.${restCommandName} = {
@@ -157,15 +177,25 @@ in
 
   dashboardCard = {
     type = "grid";
-    columns = 2;
+    columns = dashboardColumns;
     square = false;
     cards = map buttonFor keys;
   };
 
-  dashboardCardDynamic = {
-    type = "grid";
-    columns = 2;
-    square = false;
-    cards = builtins.concatLists (map dynCardsFor keys);
-  };
+  # Mushroom grid that grays items out inside their cooldown window. When any
+  # item carries a `category`, items are grouped under a markdown heading per
+  # category (a `vertical-stack` of heading + grid); otherwise it's one grid.
+  dashboardCardDynamic =
+    if hasCategories then
+      {
+        type = "vertical-stack";
+        cards = builtins.concatLists (
+          map (cat: [
+            (headingCard (if cat == "" then "Other" else cat))
+            (mushroomGrid (keysInCategory cat))
+          ]) orderedCategories
+        );
+      }
+    else
+      mushroomGrid sortedKeys;
 }

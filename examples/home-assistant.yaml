@@ -64,34 +64,28 @@ rest:
         device_class: timestamp
         value_template: "{{ value_json['paper_towels']['last_placed_at'] }}"
         json_attributes_path: "$['paper_towels']"
-        json_attributes: [title, on_cooldown, cooldown_until, cooldown_days, last_placed_at]
+        json_attributes: [title, category, on_cooldown, cooldown_until, cooldown_days, last_placed_at]
       # …one sensor per catalog item (toilet_paper, dish_soap, …).
 
 # ─────────── Dashboard card ───────────
-# Lovelace (YAML mode) — a grid of one button per staple. Each item is a pair of
-# `conditional` cards (no HACS): the active button when it's outside its cooldown
-# window, a grayed-out "last ordered" note while it's inside it.
+# Lovelace — one `custom:mushroom-template-card` per staple (HACS `mushroom`
+# required). Outside its cooldown the card is a teal tappable button; inside it
+# grays out (icon_color: disabled) and the secondary line says when it was last
+# ordered. One card, no `conditional` swap. When catalog items set a `category`,
+# the generator groups them under a `## <category>` markdown heading.
 #
-# type: grid
-# columns: 2
+# type: grid          # the generator wraps this in a vertical-stack when
+# columns: 2          # categories are present (heading + grid per category)
 # square: false
 # cards:
-#   - type: conditional
-#     conditions:
-#       - condition: template
-#         value_template: "{{ not is_state_attr('sensor.roomieorder_paper_towels', 'on_cooldown', true) }}"
-#     card:
-#       type: button
-#       name: Paper Towels
-#       icon: mdi:paper-roll
-#       tap_action: { action: perform-action, perform_action: script.order_paper_towels }
-#   - type: conditional
-#     conditions:
-#       - condition: template
-#         value_template: "{{ is_state_attr('sensor.roomieorder_paper_towels', 'on_cooldown', true) }}"
-#     card:
-#       type: markdown
-#       content: |
-#         <ha-icon icon="mdi:paper-roll"></ha-icon> **Paper Towels**
-#         <br>⏳ ordered {{ relative_time(as_datetime(states('sensor.roomieorder_paper_towels'))) }} ago
-#   # …repeat the pair for toilet_paper, dish_soap, …
+#   - type: custom:mushroom-template-card
+#     primary: Paper Towels
+#     icon: mdi:paper-roll
+#     fill_container: true
+#     icon_color: "{% if is_state_attr('sensor.roomieorder_paper_towels', 'on_cooldown', true) %}disabled{% else %}teal{% endif %}"
+#     secondary: >-
+#       {% set s = states('sensor.roomieorder_paper_towels') %}
+#       {% if is_state_attr('sensor.roomieorder_paper_towels', 'on_cooldown', true)
+#       and s not in ['unknown', 'unavailable', ''] %}{{ relative_time(as_datetime(s)) }} ago{% endif %}
+#     tap_action: { action: perform-action, perform_action: script.order_paper_towels }
+#   # …one card per item (toilet_paper, dish_soap, …).

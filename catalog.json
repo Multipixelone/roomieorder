@@ -8,7 +8,8 @@
     "qty": 1,
     "expected_price": 24.99,
     "price_ceiling": 32.00,
-    "cooldown_days": 10
+    "cooldown_days": 10,
+    "category": "Paper Goods"
   },
   "toilet_paper": {
     "title": "Charmin Ultra Soft, 18 Mega Rolls",
@@ -19,7 +20,8 @@
     "qty": 1,
     "expected_price": 27.99,
     "price_ceiling": 36.00,
-    "cooldown_days": 14
+    "cooldown_days": 14,
+    "category": "Paper Goods"
   },
   "dish_soap": {
     "title": "Dawn Ultra Dishwashing Liquid, 3-Pack",
@@ -30,6 +32,7 @@
     "qty": 1,
     "expected_price": 11.99,
     "price_ceiling": 16.00,
-    "cooldown_days": 21
+    "cooldown_days": 21,
+    "category": "Kitchen"
   }
 }
