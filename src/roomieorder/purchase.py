@@ -58,6 +58,15 @@ _CHALLENGE_MARKERS = (
     "/errors/validatecaptcha",
 )
 
+# A logged-out profile gets bounced to the sign-in wall the moment it tries to
+# check out. That's not a challenge — it needs `roomieorder login`, not a
+# manual captcha — so detect it separately and stop with a clear message.
+_SIGNIN_MARKERS = (
+    "/ap/signin",
+    "sign in or create account",
+    "enter mobile number or email",
+)
+
 # Ordered, redundant locators. Each is tried in turn; the first that resolves
 # wins. Role/text first (survives CSS churn), id/name as backstops.
 _PRICE_SELECTORS = (
@@ -141,6 +150,11 @@ def looks_like_challenge(text: str, url: str = "") -> bool:
     return any(marker in haystack for marker in _CHALLENGE_MARKERS)
 
 
+def looks_like_signin(text: str, url: str = "") -> bool:
+    haystack = f"{text}\n{url}".lower()
+    return any(marker in haystack for marker in _SIGNIN_MARKERS)
+
+
 class AmazonPurchaser:
     """Drives one purchase per :meth:`buy` call, launching a fresh persistent
     context each time so no stale checkout state leaks between orders."""
@@ -186,6 +200,8 @@ class AmazonPurchaser:
             try:
                 page.goto(url, wait_until="domcontentloaded")
 
+                if self._is_signin(page):
+                    return self._signin_required(page, item_key, "product")
                 if self._is_challenge(page):
                     return self._challenge(page, item_key, "product")
 
@@ -220,11 +236,14 @@ class AmazonPurchaser:
                     )
 
                 page.wait_for_load_state("domcontentloaded")
+                if self._is_signin(page):
+                    return self._signin_required(page, item_key, "checkout")
                 if self._is_challenge(page):
                     return self._challenge(page, item_key, "checkout")
 
                 # ── DRY_RUN stops here ──
                 if self.config.dry_run:
+                    self._settle(page)
                     shot = self._screenshot(page, item_key, "review")
                     return PurchaseResult(
                         status="dry_run",
@@ -244,9 +263,12 @@ class AmazonPurchaser:
                     )
 
                 page.wait_for_load_state("domcontentloaded")
+                if self._is_signin(page):
+                    return self._signin_required(page, item_key, "confirm")
                 if self._is_challenge(page):
                     return self._challenge(page, item_key, "confirm")
 
+                self._settle(page)
                 order_id, total = self._scrape_confirmation(page)
                 self._screenshot(page, item_key, "confirmation")
                 return PurchaseResult(
@@ -393,6 +415,19 @@ class AmazonPurchaser:
                 continue
         return order_id, total
 
+    def _settle(self, page: object) -> None:
+        """Let a freshly-navigated page paint before we shoot it.
+
+        ``domcontentloaded`` fires before Amazon's JS renders the checkout body,
+        so without this the screenshot is just the header bar over a blank white
+        page. Both waits are bounded and best-effort — Amazon's checkout rarely
+        goes fully ``networkidle``, so we cap it and shoot whatever we have."""
+        for state in ("load", "networkidle"):
+            try:
+                page.wait_for_load_state(state, timeout=8_000)  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 — bounded wait; shoot what painted
+                pass
+
     def _is_challenge(self, page: object) -> bool:
         try:
             text = page.locator("body").inner_text(timeout=3_000)  # type: ignore[attr-defined]
@@ -401,11 +436,38 @@ class AmazonPurchaser:
             return False
         return looks_like_challenge(text, url)
 
+    def _is_signin(self, page: object) -> bool:
+        try:
+            url = page.url  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            return False
+        if "/ap/signin" in url.lower():
+            return True
+        try:
+            text = page.locator("body").inner_text(timeout=3_000)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            return False
+        return looks_like_signin(text, url)
+
     def _challenge(self, page: object, item_key: str, where: str) -> PurchaseResult:
         shot = self._screenshot(page, item_key, f"challenge_{where}")
         return PurchaseResult(
             status="challenge",
             message=f"⚠️ Amazon challenge on the {where} page — worker paused, clear it manually",
+            screenshot=shot,
+        )
+
+    def _signin_required(self, page: object, item_key: str, where: str) -> PurchaseResult:
+        """The profile got bounced to the sign-in wall on the ``where`` page —
+        it's logged out. Pause with a clear next step rather than mislabeling the
+        login form as a review screenshot."""
+        shot = self._screenshot(page, item_key, f"signin_{where}")
+        return PurchaseResult(
+            status="challenge",
+            message=(
+                f"⚠️ Amazon is logged out (hit the sign-in wall on the {where} page) — "
+                "run `roomieorder login`, then retry"
+            ),
             screenshot=shot,
         )
 

@@ -283,11 +283,11 @@ Do these on `link`, logged into the graphical session, in order:
 
 1. **Amazon login.** Launch the persistent profile once and sign in by hand:
    ```
-   roomieorder dry-run paper_towels    # opens the headed browser on the profile
+   roomieorder login    # opens the headed browser on the profile, waits for you
    ```
-   If you're not logged in, log in in that window; the session persists in
-   `~/.local/state/roomieorder/profile`. Confirm a default shipping address and
-   1-tap / default payment are set on the account.
+   Log in in that window, then press any key in the terminal to save & close;
+   the session persists in `~/.local/state/roomieorder/profile`. Confirm a
+   default shipping address and 1-tap / default payment are set on the account.
 2. **Verify each item reaches the review page** (still `DRY_RUN=true`):
    `roomieorder dry-run <item>` for every catalog key — it stops at the review
    page and screenshots to `~/.local/state/roomieorder/shots/`.

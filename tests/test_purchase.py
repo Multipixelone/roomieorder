@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from roomieorder.purchase import looks_like_challenge, parse_price
+from roomieorder.purchase import looks_like_challenge, looks_like_signin, parse_price
 
 
 @pytest.mark.parametrize(
@@ -32,3 +32,17 @@ def test_parse_price(text: str, expected: float | None) -> None:
 )
 def test_looks_like_challenge(text: str, url: str, expected: bool) -> None:
     assert looks_like_challenge(text, url) is expected
+
+
+@pytest.mark.parametrize(
+    "text,url,expected",
+    [
+        ("Sign in or create account", "", True),
+        ("Enter mobile number or email", "", True),
+        ("", "https://www.amazon.com/ap/signin?openid", True),
+        ("Secure checkout — Place your order", "", False),
+        ("normal product page", "https://www.amazon.com/dp/B07X", False),
+    ],
+)
+def test_looks_like_signin(text: str, url: str, expected: bool) -> None:
+    assert looks_like_signin(text, url) is expected
