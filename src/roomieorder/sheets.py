@@ -78,6 +78,7 @@ class SheetsLogger:
 
         import gspread  # imported lazily; heavy + optional
         from google.oauth2.service_account import Credentials
+        from gspread.utils import ValueInputOption
 
         key_path = Path(self.service_account_json)
         info = json.loads(key_path.read_text())
@@ -86,9 +87,16 @@ class SheetsLogger:
         spreadsheet = client.open_by_key(self.sheet_id)
         try:
             ws = spreadsheet.worksheet(self.tab)
+            # A hand-created tab won't have our header row, which leaves the
+            # append table unanchored — write it once so row 1 is always the
+            # header and appends stay in columns A:K.
+            if ws.row_values(1) != COLUMNS:
+                ws.update(
+                    [COLUMNS], range_name="A1", value_input_option=ValueInputOption.raw
+                )
         except gspread.WorksheetNotFound:
             ws = spreadsheet.add_worksheet(title=self.tab, rows=1000, cols=len(COLUMNS))
-            ws.append_row(COLUMNS, value_input_option="RAW")  # type: ignore[arg-type]
+            ws.append_row(COLUMNS, value_input_option=ValueInputOption.raw)
         self._worksheet = ws
         return ws
 
@@ -100,7 +108,18 @@ class SheetsLogger:
         """
         try:
             ws = self._open()
-            ws.append_row(row_to_values(row), value_input_option="USER_ENTERED")  # type: ignore[attr-defined]
+            # Pin appends to the header table at A1. Without table_range, gspread
+            # auto-detects the "table" from the used range; because each row we
+            # append leaves trailing empty cells (order_total/order_id are often
+            # blank), that range creeps rightward and every subsequent row lands
+            # further right in a diagonal staircase — data ends up off-screen
+            # instead of under the headers. Anchoring at A1 keeps every row in
+            # columns A:K.
+            ws.append_row(  # type: ignore[attr-defined]
+                row_to_values(row),
+                value_input_option="USER_ENTERED",
+                table_range="A1",
+            )
         except Exception as exc:  # noqa: BLE001 — best-effort logging
             _logger.error("sheets append failed: %s", exc)
             return False
