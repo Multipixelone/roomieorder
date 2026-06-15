@@ -5,14 +5,19 @@ let
   # roomieorder must run headed against the logged-in graphical session to
   # reach $DISPLAY / $WAYLAND_DISPLAY (PLAN §4). A *system* service can't see
   # those, so this is a systemd **user** service bound to graphical-session.
-  stateDir = "%S/roomieorder"; # systemd expands %S → ~/.local/state under user units
+  # systemd expands %S → the user's state dir (~/.local/state); StateDirectory=
+  # creates and owns roomieorder/ inside it. Specifiers resolve in
+  # WorkingDirectory=, so anchor there and use *relative* state paths — that
+  # avoids depending on %S being expanded inside Environment= (which is murky).
+  stateDir = "%S/roomieorder";
 
   baseEnv = {
     PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
     PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
-    ROOMIEORDER_DB = "${stateDir}/state.sqlite";
-    ROOMIEORDER_PROFILE_DIR = "${stateDir}/profile";
-    ROOMIEORDER_SHOTS_DIR = "${stateDir}/shots";
+    # Relative to WorkingDirectory (= stateDir below).
+    ROOMIEORDER_DB = "state.sqlite";
+    ROOMIEORDER_PROFILE_DIR = "profile";
+    ROOMIEORDER_SHOTS_DIR = "shots";
     ROOMIEORDER_CATALOG = cfg.catalogFile;
     DRY_RUN = lib.boolToString cfg.dryRun;
     ROOMIEORDER_WAYLAND = lib.boolToString cfg.wayland;

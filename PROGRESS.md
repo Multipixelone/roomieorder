@@ -78,3 +78,20 @@ NixOS module eval). 45 tests pass.
   address + 1-tap payment.
 - [ ] `roomieorder dry-run <item>` for each staple until it reaches the review
   page, *then* flip `DRY_RUN=false` for one cheap item.
+
+## infra handoff
+
+- **PLAN-ROOMIE.md** added — a step-by-step for wiring roomieorder into the
+  `infra` flake: it targets host **`link`** (the Hyprland desktop that already
+  runs openclaw + commutecompass), agenix env-file secret from `nix-secrets`,
+  the openclaw wrapper reuse, cross-host HA buttons on `iot` (HA POSTs to
+  link's LAN addr `192.168.6.6:8723`), and the one-time manual bring-up.
+- Confirmed the module **accepts an agenix env-file secret** via
+  `environmentFile = config.age.secrets."roomieorder".path` (verified by NixOS
+  eval: `EnvironmentFile` renders, `EnvironmentFile` overrides `Environment=`
+  so `OPENCLAW_TARGET` etc. stay out of /nix/store).
+- Hardened the module: state paths are now **relative to `WorkingDirectory`**
+  (`%S/roomieorder`) instead of embedding `%S` in `Environment=` values, which
+  isn't reliably specifier-expanded.
+- PLAN.md reconciled with the as-built code (name, OpenClaw-only notify,
+  env+catalog config, real layout, phase status).

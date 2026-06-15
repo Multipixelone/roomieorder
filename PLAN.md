@@ -1,6 +1,18 @@
-# Talon — Household Auto-Buy Plan
+# roomieorder — Household Auto-Buy Plan
 
-*Working name: **Talon** (raptor theme, matches Kestrel / OpenClaw). Rename freely.*
+> **Status: built.** This was the design doc (working name *Talon*); the project
+> shipped as **`roomieorder`**. The app is implemented, tested, and packaged —
+> see [`PROGRESS.md`](./PROGRESS.md) for the build log and
+> [`PLAN-ROOMIE.md`](./PLAN-ROOMIE.md) for deploying it into the `infra` flake.
+> Where this doc and the code disagree, the code wins; the notes below are
+> reconciled to match what was actually built.
+>
+> Two deliberate changes from the original design:
+> - **Notifications are OpenClaw-only** (the worker shells out to
+>   `openclaw message send`), not direct Telegram — the daemon can't pipe
+>   through `openclaw-send.sh` like a oneshot.
+> - **Config is env vars + `catalog.json`**, not a TOML file. Secrets live in
+>   the env / the browser profile.
 
 A button on the Home Assistant dashboard → an item gets ordered from Amazon automatically → the purchase and price land in a Google Sheet. No confirm step; roommates are trusted.
 
@@ -37,7 +49,7 @@ HA dashboard button
    → Playwright buys the item             │  EXECUTION (needs display)
    → scrape order # + total               │
    → append to Google Sheet               │
-   → Telegram notify (success/fail)       ┘
+   → OpenClaw notify (success/fail)       ┘
 ```
 
 **Why the queue:** intake is instant and always-on; execution needs the graphical session. If the desktop is asleep, requests sit in the queue and drain on wake. It also gives free retries on Amazon flakiness. Intake never blocks on the browser.
@@ -51,8 +63,8 @@ Each button calls a `rest_command` with a fixed `item_key`. No text box, no fuzz
 
 ```yaml
 rest_command:
-  talon_reorder:
-    url: "http://localhost:8723/reorder"
+  roomieorder_reorder:
+    url: "http://192.168.6.6:8723/reorder"   # link's LAN addr; HA runs on iot
     method: POST
     content_type: "application/json"
     payload: '{"item_key": "{{ item_key }}"}'
@@ -60,11 +72,14 @@ rest_command:
 script:
   order_paper_towels:
     sequence:
-      - service: rest_command.talon_reorder
+      - service: rest_command.roomieorder_reorder
         data: { item_key: "paper_towels" }
 ```
 
-Dashboard: a grid of `button` cards, one per script. Optional: per-roommate button rows if you want attribution (otherwise everything logs as `household` — see §6).
+Dashboard: a grid of `button` cards, one per script. Everything logs as
+`household` (no per-roommate attribution — decided out of scope). Full example
+in [`examples/home-assistant.yaml`](./examples/home-assistant.yaml); the
+cross-host Nix wiring is in [`PLAN-ROOMIE.md`](./PLAN-ROOMIE.md) §3.
 
 ### 3.2 Item catalog — `catalog.json`
 The "kind I like" lives here. You populate the ASINs once.
@@ -117,11 +132,17 @@ Columns: `timestamp | item_key | title | asin | qty | unit_price | order_total |
 
 `status` ∈ `placed | dry_run | skipped_cooldown | price_blocked | failed | challenge`.
 
-### 3.6 Notifications — OpenClaw / Telegram
-- ✅ placed: `Ordered Bounty 12-pack — $24.99 — #123-4567890. Arrives Tue.`
-- 🧪 dry run: `[DRY] Would order paper_towels at $24.99.`
+### 3.6 Notifications — OpenClaw
+The worker shells out to `openclaw message send --channel … --target … --message …`
+once per message (`notify.py` → `OpenClawNotifier`), attaching the screenshot
+via `--photo` when there is one. Best-effort: a delivery failure is logged but
+never fails an order. With no `OPENCLAW_TARGET` set it degrades to a
+`NullNotifier` that just logs.
+
+- ✅ placed: `Ordered Bounty 12-pack — $24.99 — #123-4567890.`
+- 🧪 dry run: `[DRY] would order paper_towels at $24.99.`
 - ⛔ price blocked / cooldown skip: short line, no action needed.
-- ⚠️ failed / challenge: include the screenshot, and state the worker is **paused** until you clear it.
+- ⚠️ failed / challenge: includes the screenshot; the worker is **paused** until you `roomieorder resume`.
 
 ---
 
@@ -158,26 +179,38 @@ On Wayland, pass `--ozone-platform=wayland` (or let XWayland handle it) in the P
 - Telegram bot token + chat ID.
 - Amazon login is *not* stored as a credential — it lives in the persistent browser profile after your one-time manual login.
 
-### Layout (mirrors commutecop)
+### Layout (as built — mirrors commutecop)
 ```
-talon/
-  flake.nix
-  pyproject.toml
-  talon/
-    main.py        # FastAPI intake + worker loop
-    catalog.py
-    purchase.py    # Playwright buy flow
-    sheets.py
-    notify.py
-    guards.py      # cooldown, debounce, spend cap, price ceiling
-    config.py
+roomieorder/
+  flake.nix              # flake-utils + git-hooks.nix; pins playwright browsers
+  pyproject.toml         # hatchling; ruff/mypy(strict)/pytest
+  nix/
+    package.nix          # buildPythonApplication
+    module.nix           # systemd USER service (graphical-session.target)
+  src/roomieorder/
+    __main__.py
+    config.py            # env loader (no TOML)
+    catalog.py           # catalog.json loader + validation
+    store.py             # SQLite queue + guard bookkeeping
+    main.py              # FastAPI intake (/reorder /health /queue) + worker loop
+    purchase.py          # Playwright buy flow (DRY_RUN, challenge detection)
+    sheets.py            # gspread append (best-effort)
+    notify.py            # OpenClawNotifier (subprocess)
+    guards.py            # debounce, cooldown, price ceiling, spend cap
+    cli.py               # serve/init-db/catalog/queue/test-notify/dry-run/pause/resume/status
   catalog.json
-  nix/module.nix
-  data/
-    profile/       # persistent Chromium profile (gitignored)
-    state.sqlite   # queue + guard bookkeeping
-    shots/         # failure screenshots
+  tests/                 # 45 cases; non-browser logic + intake endpoint
+  examples/              # env.example, catalog.json, home-assistant.yaml
+  data/                  # (gitignored, runtime)
+    profile/             # persistent Chromium profile
+    state.sqlite         # queue + guard bookkeeping
+    shots/               # failure screenshots
 ```
+
+The systemd unit is a **user** service (`systemd.user.services.roomieorder`)
+bound to `graphical-session.target`, not a system service — headed Chromium
+needs the session's `$WAYLAND_DISPLAY`/`$DISPLAY`. State lives under
+`%S/roomieorder` (`~/.local/state/roomieorder`).
 
 ---
 
@@ -201,16 +234,22 @@ talon/
 
 ---
 
-## 7. Build phases (20-min blocks; success = the block ran, not "done")
+## 7. Build phases
 
-0. **Scaffold** — repo, flake, `catalog.json` schema, `config.py`. No browser.
-1. **Intake loop** — FastAPI `/reorder` + HA button + a stub purchase that just Telegram-pings "would buy X." Tap a button, get a ping. *This is the satisfying first win.*
-2. **Sheets** — gspread appends a test row.
-3. **Playwright on NixOS** — get a headed Chromium launching from the persistent profile; log into Amazon by hand once. (Budget extra time; this is the gnarly env block.)
-4. **Buy flow in `DRY_RUN`** — navigate to a real ASIN, reach the review page, screenshot, stop.
-5. **One real buy** — flip `DRY_RUN` off for a single cheap item; place it; scrape order # + total; log to Sheets.
-6. **Guards + alerts** — cooldown, debounce, price ceiling, spend cap, challenge pause.
-7. **Fill the catalog** — add every staple + its dashboard button.
+Code phases 0–6 are **done** (✅ = implemented + tested in this repo). Phases
+needing the operator's hands / account / a live display are ⏳ — they're carried
+out during deploy (see [`PLAN-ROOMIE.md`](./PLAN-ROOMIE.md) §4).
+
+0. ✅ **Scaffold** — repo, flake, `catalog.json` schema, `config.py`.
+1. ✅ **Intake loop** — FastAPI `/reorder` `/health` `/queue` + HA button + worker.
+2. ✅ **Sheets** — gspread append (best-effort; no-op until configured).
+3. ⏳ **Playwright on NixOS** — browsers pinned + module wired; the one-time
+   manual Amazon login into the persistent profile happens on deploy.
+4. ✅ **Buy flow in `DRY_RUN`** — full flow written; stops + screenshots at the
+   review page. (Exercised live per-item during bring-up.)
+5. ⏳ **One real buy** — flip `DRY_RUN` off for one cheap item (deploy step).
+6. ✅ **Guards + alerts** — cooldown, debounce, price ceiling, spend cap, challenge pause.
+7. ⏳ **Fill the catalog** — replace the placeholder ASINs with real ones + add each dashboard button.
 
 ---
 
