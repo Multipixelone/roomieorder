@@ -83,6 +83,10 @@ class _RoleLocator:
     def first(self) -> "_RoleLocator":
         return self
 
+    def wait_for(self, state: str | None = None, timeout: int | None = None) -> None:
+        if not self._hit:
+            raise TimeoutError("never visible")
+
     def click(self, timeout: int | None = None) -> None:
         if not self._hit:
             raise TimeoutError("no role match")
@@ -107,6 +111,9 @@ class _FakePage:
         return _FakeLocator(self, selector)
 
     def get_by_role(self, role: str, name: object = None) -> _RoleLocator:
+        return _RoleLocator(self, self._role_text)
+
+    def get_by_text(self, text: object) -> _RoleLocator:
         return _RoleLocator(self, self._role_text)
 
     def wait_for_selector(self, selector: str, timeout: int | None = None) -> None:

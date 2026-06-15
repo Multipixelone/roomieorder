@@ -261,11 +261,12 @@ class AmazonPurchaser:
                 # domcontentloaded, so the button isn't in the DOM the instant
                 # we arrive. Settle first (the same wait the dry-run review shot
                 # relies on — without it the body is a blank "Secure checkout"
-                # header), then wait specifically for the button before clicking;
-                # otherwise _place_order races an unpainted body and pauses
-                # spuriously against a blank page.
+                # header), then let _place_order wait on the button itself.
+                # (Don't pre-wait on _PLACE_ORDER_SELECTORS here: those CSS ids
+                # only exist on the classic SPC page, so on the newer "Secure
+                # checkout" redesign the wait burns the whole step timeout and
+                # the checkout session blanks out before we ever click.)
                 self._settle(page)
-                self._wait_for_any(page, _PLACE_ORDER_SELECTORS)
                 if not self._place_order(page):
                     # A slow render, a sign-in wall, or a challenge can all land
                     # us here with no button. Re-check the latter two so the
@@ -407,21 +408,33 @@ class AmazonPurchaser:
             return False
 
     def _place_order(self, page: object) -> bool:
-        """Click Place Your Order; fall back to the button's text.
+        """Click Place Your Order, waiting on the button's *accessible name*.
 
         The CSS ids drift between Amazon's checkout variants (thin Buy-Now
-        flow vs. the full review page), so a missed id reads as "couldn't find
-        Place Your Order" even when the button is right there. The visible text
-        is far more stable, so try a role/text match before giving up — same
-        belt-and-suspenders approach as ``_start_checkout``'s checkout link."""
+        flow vs. the full review page), and the newer "Secure checkout"
+        redesign exposes *none* of them, so keying off the ids reads as
+        "couldn't find Place Your Order" even when the button is right there.
+        The visible text "Place your order" is stable across every variant, so
+        wait on the role-named button first and click it promptly — before the
+        checkout session goes stale — then fall back to the drifting ids and a
+        looser text match for the classic page."""
+        btn = page.get_by_role(  # type: ignore[attr-defined]
+            "button", name=re.compile("place your order", re.I)
+        )
+        try:
+            btn.first.wait_for(state="visible", timeout=_STEP_TIMEOUT_MS)
+            btn.first.click(timeout=5_000)
+            return True
+        except Exception:  # noqa: BLE001 — fall through to the id/text fallbacks
+            pass
         if self._click_first(page, _PLACE_ORDER_SELECTORS):
             return True
         try:
-            page.get_by_role(  # type: ignore[attr-defined]
-                "button", name=re.compile("place your order", re.I)
+            page.get_by_text(  # type: ignore[attr-defined]
+                re.compile("place your order", re.I)
             ).first.click(timeout=5_000)
             return True
-        except Exception:  # noqa: BLE001 — no text match either; caller fails
+        except Exception:  # noqa: BLE001 — no match anywhere; caller fails
             return False
 
     def _page_debug(self, page: object) -> str:
