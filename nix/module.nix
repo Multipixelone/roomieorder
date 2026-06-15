@@ -26,6 +26,33 @@ let
   }
   // lib.optionalAttrs (cfg.openclaw.target != "") { OPENCLAW_TARGET = cfg.openclaw.target; }
   // cfg.extraEnvironment;
+
+  # A terminal `roomieorder` that carries the *same* context the unit does, so
+  # `roomieorder dry-run …`, `catalog`, `queue`, `status`, … read the catalog,
+  # state.sqlite and profile the service uses — not whatever's under $PWD.
+  # Three things to reproduce: (1) baseEnv, (2) cd into the unit's
+  # StateDirectory so the *relative* ROOMIEORDER_DB / PROFILE_DIR / SHOTS_DIR
+  # resolve to the unit's files, (3) source the secret env file when readable.
+  exportBaseEnv = lib.concatStringsSep "\n"
+    (lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}") baseEnv);
+
+  cliEnvFile = lib.escapeShellArg (toString cfg.environmentFile);
+
+  wrappedCli = pkgs.writeShellScriptBin "roomieorder" ''
+    ${exportBaseEnv}
+    # %S for a *user* unit → $XDG_STATE_HOME (default ~/.local/state). Match the
+    # unit's WorkingDirectory so the relative state paths above line up.
+    state="''${XDG_STATE_HOME:-$HOME/.local/state}/roomieorder"
+    mkdir -p "$state"
+    cd "$state" || exit 1
+    # systemd EnvironmentFile is KEY=value; `set -a` exports each sourced name.
+    if [ -r ${cliEnvFile} ]; then
+      set -a
+      . ${cliEnvFile}
+      set +a
+    fi
+    exec ${cfg.package}/bin/roomieorder "$@"
+  '';
 in
 {
   options.services.roomieorder = {
@@ -128,8 +155,9 @@ in
       };
     };
 
-    # CLI on PATH so the operator can run `roomieorder dry-run paper_towels`,
-    # `roomieorder resume`, etc. from their shell with the same env file.
-    environment.systemPackages = [ cfg.package ];
+    # Wrapped CLI on PATH so the operator can run `roomieorder dry-run
+    # paper_towels`, `roomieorder resume`, etc. from their shell against the
+    # same catalog, env file and state the service uses (see wrappedCli above).
+    environment.systemPackages = [ wrappedCli ];
   };
 }
