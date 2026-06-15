@@ -61,7 +61,12 @@ class OpenClawNotifier:
         if photo is not None:
             # openclaw's attachment flag is --media <path-or-url> (handles
             # image/audio/video/document); the older --photo was removed.
-            cmd += ["--media", str(photo)]
+            # openclaw runs a separate gateway process and resolves a relative
+            # path against *its* cwd, so always hand it an absolute path or the
+            # screenshot is silently undeliverable. (The path must also live
+            # under one of openclaw's allowed media roots — the deployment
+            # points the shots dir there.)
+            cmd += ["--media", str(photo.resolve())]
         try:
             result = subprocess.run(
                 cmd,
