@@ -259,18 +259,24 @@ class AmazonPurchaser:
                 # ── place the order ──
                 # Amazon renders the checkout body via JS *after*
                 # domcontentloaded, so the button isn't in the DOM the instant
-                # we arrive. Wait for it before clicking; otherwise _click_first
-                # races a blank "Secure checkout" body and pauses spuriously.
+                # we arrive. Settle first (the same wait the dry-run review shot
+                # relies on — without it the body is a blank "Secure checkout"
+                # header), then wait specifically for the button before clicking;
+                # otherwise _place_order races an unpainted body and pauses
+                # spuriously against a blank page.
+                self._settle(page)
                 self._wait_for_any(page, _PLACE_ORDER_SELECTORS)
                 if not self._place_order(page):
                     # A slow render, a sign-in wall, or a challenge can all land
                     # us here with no button. Re-check the latter two so the
                     # operator gets the right next step, not a misleading
-                    # "couldn't find Place Your Order".
+                    # "couldn't find Place Your Order". Settle again so the
+                    # diagnostic shot shows the real page, not a blank header.
                     if self._is_signin(page):
                         return self._signin_required(page, item_key, "checkout")
                     if self._is_challenge(page):
                         return self._challenge(page, item_key, "checkout")
+                    self._settle(page)
                     shot = self._screenshot(page, item_key, "no_place_order")
                     return PurchaseResult(
                         status="failed",
