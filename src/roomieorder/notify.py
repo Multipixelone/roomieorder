@@ -59,7 +59,9 @@ class OpenClawNotifier:
             text,
         ]
         if photo is not None:
-            cmd += ["--photo", str(photo)]
+            # openclaw's attachment flag is --media <path-or-url> (handles
+            # image/audio/video/document); the older --photo was removed.
+            cmd += ["--media", str(photo)]
         try:
             result = subprocess.run(
                 cmd,

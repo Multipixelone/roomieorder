@@ -40,7 +40,7 @@ def test_openclaw_builds_command(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cmd[:3] == ["openclaw", "message", "send"]
     assert "--target" in cmd and "-555" in cmd
     assert "--message" in cmd and "hello" in cmd
-    assert "--photo" in cmd and "/tmp/shot.png" in cmd
+    assert "--media" in cmd and "/tmp/shot.png" in cmd
 
 
 def test_openclaw_nonzero_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
