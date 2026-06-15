@@ -7,6 +7,7 @@ Subcommands:
 * ``catalog``     — print the catalog.
 * ``queue``       — show recent queue rows.
 * ``test-notify`` — emit a test message via the configured notifier.
+* ``test-sheet``  — append a test row to the configured Google Sheet.
 * ``login``        — open the profile headed to sign into Amazon by hand.
 * ``dry-run KEY`` — drive one item to its review page and screenshot, no order.
 * ``resume`` / ``pause`` / ``status`` — manage the worker-pause flag.
@@ -15,6 +16,7 @@ Subcommands:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 import click
 
@@ -22,6 +24,7 @@ from roomieorder.catalog import load_catalog
 from roomieorder.config import load_config
 from roomieorder.guards import check_price_ceiling, check_spend_cap
 from roomieorder.notify import build_notifier
+from roomieorder.sheets import build_sheets
 from roomieorder.store import Store
 
 
@@ -110,6 +113,41 @@ def test_notify(message: str) -> None:
     notifier = build_notifier(config)
     ok = notifier.send(message)
     click.echo("sent" if ok else "FAILED — check OPENCLAW_* env and the openclaw binary")
+    raise SystemExit(0 if ok else 1)
+
+
+@main.command(name="test-sheet")
+def test_sheet() -> None:
+    """Append a test row to the configured Google Sheet.
+
+    Verifies the Sheets integration end-to-end (auth, share, append) without
+    placing an order. Refuses up front when Sheets is unconfigured, since
+    ``build_sheets`` would otherwise return a no-op logger that silently
+    "succeeds" — exactly the trap that makes a misconfigured sheet look fine.
+    """
+    config = load_config()
+    if not config.sheets_enabled:
+        click.echo(
+            "Sheets not configured — set ROOMIEORDER_SHEET_ID and "
+            "GOOGLE_SERVICE_ACCOUNT_JSON, then share the sheet with the "
+            "service account's email."
+        )
+        raise SystemExit(1)
+    sheets = build_sheets(config)
+    ok = sheets.append(
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "item_key": "test-sheet",
+            "title": "roomieorder test row 🦅",
+            "status": "test",
+            "notes": "appended by `roomieorder test-sheet` — safe to delete",
+        }
+    )
+    click.echo(
+        f"appended a test row to sheet {config.sheet_id} (tab {config.sheet_tab!r})"
+        if ok
+        else "FAILED — run with -v to see the gspread error (auth, sharing, sheet id)"
+    )
     raise SystemExit(0 if ok else 1)
 
 
