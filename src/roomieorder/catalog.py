@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 
 class CatalogError(Exception):
@@ -44,7 +44,7 @@ class CatalogItem(BaseModel):
 
     @field_validator("price_ceiling")
     @classmethod
-    def _ceiling_above_expected(cls, v: float, info) -> float:  # type: ignore[no-untyped-def]
+    def _ceiling_above_expected(cls, v: float, info: ValidationInfo) -> float:
         expected = info.data.get("expected_price")
         if expected is not None and v < expected:
             raise ValueError(
