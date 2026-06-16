@@ -21,8 +21,8 @@ from datetime import datetime, timezone
 
 import click
 
-from roomieorder.catalog import load_catalog
-from roomieorder.config import load_config
+from roomieorder.catalog import CatalogItem, load_catalog
+from roomieorder.config import Config, load_config
 from roomieorder.guards import check_price_ceiling, check_spend_cap
 from roomieorder.notify import build_notifier
 from roomieorder.sheets import build_sheets
@@ -34,6 +34,27 @@ def _setup_logging(verbose: bool) -> None:
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+
+def _purchaser_for(config: Config, provider: str) -> object:
+    """Build the purchaser for ``provider`` with its own profile dir + domain."""
+    from roomieorder.purchase import AmazonPurchaser, CostcoPurchaser
+
+    if provider == "amazon":
+        return AmazonPurchaser(
+            config, profile_dir=config.amazon_profile_dir, domain=config.amazon_domain
+        )
+    return CostcoPurchaser(
+        config, profile_dir=config.costco_profile_dir, domain=config.costco_domain
+    )
+
+
+def _source_for(item: CatalogItem, provider: str) -> object:
+    """The catalog source block for ``provider``, or raise if not declared."""
+    source = item.amazon if provider == "amazon" else item.costco
+    if source is None:
+        raise click.ClickException(f"item has no {provider} source declared")
+    return source
 
 
 @click.group()
@@ -78,12 +99,19 @@ def catalog(as_json: bool) -> None:
         click.echo(json.dumps({k: v.model_dump() for k, v in items.items()}, indent=2))
         return
     for key, item in items.items():
-        click.echo(
-            f"{key:16} {item.title}\n"
-            f"{'':16} item#={item.item_number} qty={item.qty} "
-            f"expected=${item.expected_price:.2f} ceiling=${item.price_ceiling:.2f} "
-            f"cooldown={item.cooldown_days}d"
-        )
+        click.echo(f"{key:16} {item.title}  qty={item.qty} cooldown={item.cooldown_days}d")
+        if item.costco is not None:
+            c = item.costco
+            click.echo(
+                f"{'':16} costco  item#={c.item_number} "
+                f"expected=${c.expected_price:.2f} ceiling=${c.price_ceiling:.2f}"
+            )
+        if item.amazon is not None:
+            a = item.amazon
+            click.echo(
+                f"{'':16} amazon  asin={a.asin} "
+                f"expected=${a.expected_price:.2f} ceiling=${a.price_ceiling:.2f}"
+            )
 
 
 @main.command()
@@ -152,60 +180,71 @@ def test_sheet() -> None:
     raise SystemExit(0 if ok else 1)
 
 
-@main.command()
-def login() -> None:
-    """Open the Costco profile in a real browser so you can sign in by hand.
+_PROVIDER_OPT = click.option(
+    "--provider",
+    type=click.Choice(["costco", "amazon"]),
+    default="costco",
+    show_default=True,
+    help="Which store to act on.",
+)
 
-    roomieorder never stores a Costco credential — the session lives in the
-    persistent Chromium profile (``profile_dir``). Run this once; later
+
+@main.command()
+@_PROVIDER_OPT
+def login(provider: str) -> None:
+    """Open the store profile in a real browser so you can sign in by hand.
+
+    roomieorder never stores a store credential — the session lives in the
+    per-store persistent Chromium profile. Run this once per store; later
     ``dry-run`` / live orders reuse the saved cookies. Disable 2FA on the
     account first: the automated buy flow halts on any login challenge.
     """
-    from roomieorder.purchase import CostcoPurchaser
-
     config = load_config()
-    purchaser = CostcoPurchaser(config)
+    purchaser = _purchaser_for(config, provider)
 
     def wait_for_operator(page: object) -> None:
-        click.echo(f"opened {config.costco_domain} on profile {config.profile_dir}")
+        click.echo(f"opened {purchaser.domain} on profile {purchaser.profile_dir}")  # type: ignore[attr-defined]
         click.pause(info="log in, then press any key here to save the session and close…")
-        if purchaser.is_logged_in(page):
+        if purchaser.is_logged_in(page):  # type: ignore[attr-defined]
             click.echo("✓ signed in — session saved to the profile")
         else:
-            click.echo("⚠️  still looks signed out — re-run `roomieorder login` if needed")
+            click.echo(
+                f"⚠️  still looks signed out — re-run `roomieorder login --provider {provider}`"
+            )
 
-    purchaser.login(wait_for_operator)
+    purchaser.login(wait_for_operator)  # type: ignore[attr-defined]
 
 
 @main.command(name="dry-run")
 @click.argument("item_key")
-def dry_run(item_key: str) -> None:
+@_PROVIDER_OPT
+def dry_run(item_key: str, provider: str) -> None:
     """Navigate ITEM_KEY to its review page and screenshot — never orders.
 
-    Forces DRY_RUN regardless of the env flag, so this is always safe to run
-    while filling out the §8 checklist.
+    Targets a single store (``--provider``) so each leg of the Costco→Amazon
+    fallback can be brought up independently. Forces DRY_RUN regardless of the
+    env flag, so this is always safe to run while filling out the §8 checklist.
     """
-    from roomieorder.purchase import CostcoPurchaser
-
     config = load_config()
     config = config.model_copy(update={"dry_run": True})
     items = load_catalog(config.catalog_path)
     item = items.get(item_key)
     if item is None:
         raise click.ClickException(f"unknown item_key: {item_key} (have: {', '.join(items)})")
+    source = _source_for(item, provider)
 
     store = Store(config.db_path)
     store.init_db()
-    purchaser = CostcoPurchaser(config)
+    purchaser = _purchaser_for(config, provider)
 
     def proceed_check(live_price: float):  # type: ignore[no-untyped-def]
-        ceiling = check_price_ceiling(item, live_price)
+        ceiling = check_price_ceiling(item.title, source.price_ceiling, live_price)  # type: ignore[attr-defined]
         if not ceiling.ok:
             return ceiling
         return check_spend_cap(store, config, live_price * item.qty)
 
-    click.echo(f"dry-run {item_key} → {item.url or config.product_url(item.item_number)}")
-    result = purchaser.buy(item_key, item, proceed_check)
+    click.echo(f"dry-run {item_key} ({provider}) → {purchaser._resolve_url(source)}")  # type: ignore[attr-defined]
+    result = purchaser.buy(item_key, item, source, proceed_check)  # type: ignore[attr-defined]
     click.echo(f"status:     {result.status}")
     click.echo(f"unit_price: {result.unit_price}")
     click.echo(f"message:    {result.message}")
@@ -216,25 +255,26 @@ def dry_run(item_key: str) -> None:
 
 @main.command(name="dump-dom")
 @click.argument("item_key")
-def dump_dom(item_key: str) -> None:
+@_PROVIDER_OPT
+def dump_dom(item_key: str, provider: str) -> None:
     """Open ITEM_KEY's product page read-only and dump the rendered DOM.
 
     A bring-up aid for confirming the live-DOM selectors: navigates to the
-    product page (reusing the logged-in profile) and writes the rendered HTML,
-    a probe of every candidate selector, and a screenshot to the shots dir, then
-    prints the probe. Never adds to cart or places an order.
+    product page for ``--provider`` (reusing that store's logged-in profile) and
+    writes the rendered HTML, a probe of every candidate selector, and a
+    screenshot to the shots dir, then prints the probe. Never adds to cart or
+    places an order.
     """
-    from roomieorder.purchase import CostcoPurchaser
-
     config = load_config()
     items = load_catalog(config.catalog_path)
     item = items.get(item_key)
     if item is None:
         raise click.ClickException(f"unknown item_key: {item_key} (have: {', '.join(items)})")
+    source = _source_for(item, provider)
 
-    purchaser = CostcoPurchaser(config)
-    click.echo(f"dump-dom {item_key} → {item.url or config.product_url(item.item_number)}")
-    result = purchaser.dump_dom(item_key, item)
+    purchaser = _purchaser_for(config, provider)
+    click.echo(f"dump-dom {item_key} ({provider}) → {purchaser._resolve_url(source)}")  # type: ignore[attr-defined]
+    result = purchaser.dump_dom(item_key, item, source)  # type: ignore[attr-defined]
     click.echo(f"logged_in:  {result.logged_in}")
     click.echo(f"challenge:  {result.challenge}")
     click.echo(f"html:       {result.html}")

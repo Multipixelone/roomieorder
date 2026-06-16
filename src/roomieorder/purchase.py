@@ -5,30 +5,32 @@ This is the brittle half (PLAN §1, §3.4). Everything here is written to fail
 timeout per step, a screenshot on every failure, and explicit challenge
 detection that halts rather than looping into a CAPTCHA.
 
-The operator logs into Costco by hand once into ``profile_dir`` (see
-:meth:`CostcoPurchaser.login`, exposed as ``roomieorder login``); the profile
-then remembers the email+password. Costco doesn't treat a remembered profile as
-authenticated until Sign In is clicked, so each buy re-establishes the session
-with :meth:`CostcoPurchaser.ensure_logged_in` (one click of the prefilled form).
-Nothing here stores a Costco credential — the login lives entirely in the
-browser profile.
+Two stores are supported, one purchaser class each, sharing a :class:`BasePurchaser`:
 
-Run order inside :meth:`CostcoPurchaser.buy`:
+* :class:`CostcoPurchaser` — tried first.
+* :class:`AmazonPurchaser` — the fallback when Costco is sold out, not carried,
+  or over its ceiling (see :mod:`roomieorder.orchestrator`).
 
-1. goto the product page (item.url, with slug; falls back to product_url())
-2. detect challenge (Costco fronts the site with Akamai); if logged out,
-   sign in with the profile's cached credentials and reload (ensure_logged_in)
-3. read live price → ``proceed_check(price)`` (price ceiling + spend cap)
-4. add to cart → go to cart → checkout (Costco has no one-click Buy Now)
-5. on the review page: detect challenge
-6. DRY_RUN → screenshot + stop; else click "Place Order"
+The operator logs into each store by hand once into its own ``profile_dir`` (see
+:meth:`BasePurchaser.login`, exposed as ``roomieorder login --provider …``); the
+profile then remembers the session. Nothing here stores a credential — the login
+lives entirely in the browser profile.
+
+Run order inside :meth:`BasePurchaser.buy`:
+
+1. goto the product page (source.url, falls back to the store's product_url())
+2. detect challenge (Costco fronts the site with Akamai); ensure logged in
+3. detect unavailability (404 / sold out / not carried) → ``unavailable`` so the
+   orchestrator can fall back to the other store
+4. read live price → ``proceed_check(price)`` (price ceiling + spend cap)
+5. reach the review page (store-specific :meth:`_start_checkout`)
+6. DRY_RUN → screenshot + stop; else click Place Order
 7. scrape order number + total
 
-⚠️ Every selector, challenge marker, order-number regex, and the checkout step
-order below is a best-guess against Costco's live DOM, which nobody here can
-see, and Akamai's bot detection is far more aggressive than Amazon's. Each
-DOM-dependent constant is flagged ``# TODO(costco): verify against live DOM``
-and MUST be confirmed during bring-up (`roomieorder login` / `dry-run`).
+⚠️ Every selector, marker, and order-number regex below is a best-guess against a
+live DOM nobody here can see. Each DOM-dependent constant is flagged
+``# TODO(<store>): verify against live DOM`` and MUST be confirmed during bring-up
+(`roomieorder login` / `dry-run` / `dump-dom`).
 """
 
 from __future__ import annotations
@@ -44,7 +46,6 @@ from typing import TYPE_CHECKING, Callable, Optional
 if TYPE_CHECKING:
     from playwright.sync_api import BrowserContext
 
-from roomieorder.catalog import CatalogItem
 from roomieorder.config import Config
 from roomieorder.guards import GuardResult
 from roomieorder.store import Status
@@ -74,112 +75,13 @@ def _playwright_api() -> object:
             continue
     raise ImportError("neither patchright nor playwright is installed")
 
+
 # Per-step navigation/click timeout. A step that stalls past this is a redesign
 # or a challenge, not slowness.
 _STEP_TIMEOUT_MS = 20_000
 
-# Markers that mean Costco/Akamai wants a human: bot wall, CAPTCHA, OTP.
-# Matched case-insensitively against page text + URL.
-# TODO(costco): verify against live DOM — Akamai's block page wording/paths.
-_CHALLENGE_MARKERS = (
-    "access denied",
-    "pardon our interruption",
-    "verify you are human",
-    "are you a human",
-    "/_sec/",
-    "akamai",
-    "reference #",
-    "recaptcha",
-    "enter the characters",
-    "verify your identity",
-)
-
-# A logged-out session gets bounced to Costco's dedicated logon page when it
-# tries to check out. That's not a challenge — it's an auth bounce. Detect it by
-# the *logon URL/host*: the "Sign In / Register" link text lives in the header
-# of every logged-out page, so body text matching it false-positives on a
-# perfectly normal product page. Live auth state is decided by `is_logged_in`
-# (account nav), not this — this only catches a mid-flow bounce to the wall.
-# "sign in or register" (the logon page's own heading, with "or", not the
-# header link's "/") is kept as a body backstop for when the URL isn't telling.
-# TODO(costco): verify against live DOM — sign-in host/path and CTA wording.
-_SIGNIN_MARKERS = (
-    "/logon",
-    "signin.costco.com",
-    "sign in or register",
-)
-# The remembered-credential logon form's submit control. The email+password are
-# cached in the profile, so submitting re-establishes the session without
-# roomieorder ever holding a credential (PLAN §1). Role/text is tried first by
-# `ensure_logged_in`; these ids/attrs are the backstop.
-# TODO(costco): verify against live DOM — logon submit control.
-_SIGNIN_SUBMIT_SELECTORS = (
-    "[automation-id='signInButton']",
-    "input#sign-in-btn",
-    "button#sign-in-btn",
-    "button[type='submit']",
-)
-
-# Ordered, redundant locators. Each is tried in turn; the first that resolves
-# wins. Role/text first (survives CSS churn), id/name as backstops.
-# Verified against live DOM 2026-06-16 (paper_towels dump-dom): Costco's PDP is
-# now a MUI/React app keyed on `data-testid`, not `automation-id`/CSS classes —
-# the price lives in `[data-testid='single-price-content']` (the *sale* price,
-# e.g. $27.39), with the old `automation-id`/class guesses all dead (count=0).
-# `single-price-content` is read first because the broader `[data-testid='price']`
-# container also holds the promo "$X OFF" strikethrough + original list price, so
-# its text would let parse_price grab the wrong number. The legacy guesses are
-# kept as backstops for any storefront variant that still renders them.
-_PRICE_SELECTORS = (
-    "[data-testid='single-price-content']",
-    "[data-testid='price']",
-    "[automation-id='productPriceOutput']",
-    ".product-price-amount",
-    ".product-price .value",
-    "span.value",
-)
-# Structured-data price sources, tried after the visible selectors miss. The
-# `/p/-/<slug>/<id>` storefront is a server-rendered Next.js app that emits the
-# product's price as standard page metadata, present in the initial HTML and
-# unambiguously the *product's* price (not a recommendations-carousel
-# neighbour's). These survive the CSS/automation-id churn that breaks
-# _PRICE_SELECTORS, so they're the durable fallback when the visible price
-# element can't be located. `<meta>` tags carry the value in their `content`
-# attribute; JSON-LD blocks carry it under `offers.price` (see _price_from_jsonld).
-_PRICE_META_SELECTORS = (
-    "meta[property='product:price:amount']",
-    "meta[property='og:price:amount']",
-    "meta[itemprop='price']",
-)
 _JSONLD_SELECTOR = "script[type='application/ld+json']"
-# Costco has no one-click Buy Now — only Add to Cart (see _start_checkout).
-# Verified against live DOM 2026-06-16 (paper_towels dump-dom): the PDP add-to-cart
-# button is `[data-testid='Button_addToCartDrawer_pdp']` (id of the same name). Its
-# *accessible name* is the product title ("Add Bounty Advanced Paper Towels, …"),
-# NOT "Add to Cart" — so _start_checkout's role/text "add to cart" match misses and
-# this CSS fallback is what actually clicks it. Legacy guesses kept as backstops.
-_ADD_TO_CART_SELECTORS = (
-    "[data-testid='Button_addToCartDrawer_pdp']",
-    "[automation-id='addToCartButton']",
-    "input[value='Add to Cart']",
-    "button#add-to-cart-btn",
-)
-# TODO(costco): verify against live DOM — final place-order button.
-_PLACE_ORDER_SELECTORS = (
-    "[automation-id='placeOrderButton']",
-    "input[value='Place Order']",
-    "button#place-order",
-)
-# TODO(costco): verify against live DOM — order-confirmation grand-total.
-_ORDER_TOTAL_SELECTORS = (
-    "[automation-id='orderTotalOutput']",
-    ".order-total .value",
-    ".grand-total .value",
-)
 
-# Costco web order numbers — best guess at the format (purely digits, ~10).
-# TODO(costco): verify against live DOM — confirm order-number format.
-_ORDER_ID_RE = re.compile(r"\b\d{9,12}\b")
 # First number-ish run in a blob: digits with optional grouping/decimal
 # separators, e.g. "24.99", "1,234.56", "11,99".
 _PRICE_RE = re.compile(r"[0-9][0-9.,]*[0-9]|[0-9]")
@@ -191,13 +93,16 @@ class PurchaseResult:
     unit_price: Optional[float] = None
     order_total: Optional[float] = None
     order_id: Optional[str] = None
+    # Which store produced this result ("costco"/"amazon"). Stamped by the
+    # orchestrator; the purchaser leaves it blank.
+    provider: str = ""
     message: str = ""
     screenshot: Optional[Path] = None
 
 
 @dataclass
 class DumpResult:
-    """Artifacts from a read-only :meth:`CostcoPurchaser.dump_dom` bring-up run.
+    """Artifacts from a read-only :meth:`BasePurchaser.dump_dom` bring-up run.
 
     ``summary`` is the same probe text written to ``probe``, surfaced so the CLI
     can print it without re-reading the file."""
@@ -208,19 +113,6 @@ class DumpResult:
     probe: Optional[Path] = None
     screenshot: Optional[Path] = None
     summary: str = ""
-
-
-# Candidate selector groups, probed by :meth:`CostcoPurchaser.dump_dom` so a
-# bring-up run reports which of every `# TODO(costco): verify against live DOM`
-# guess actually resolves on the live page.
-_PROBE_GROUPS = (
-    ("price", _PRICE_SELECTORS),
-    ("price-meta", _PRICE_META_SELECTORS),
-    ("add-to-cart", _ADD_TO_CART_SELECTORS),
-    ("place-order", _PLACE_ORDER_SELECTORS),
-    ("order-total", _ORDER_TOTAL_SELECTORS),
-    ("signin-submit", _SIGNIN_SUBMIT_SELECTORS),
-)
 
 
 # proceed_check(live_price) -> GuardResult. Lets the worker run price-ceiling
@@ -234,7 +126,7 @@ def parse_price(text: str) -> Optional[float]:
 
     Handles both US grouping (``$1,234.56``) and European decimal-comma
     (``€11,99``) by treating the *last* ``.``/``,`` as the decimal point and
-    dropping every other separator as grouping. Costco shows cents, so the
+    dropping every other separator as grouping. Both stores show cents, so the
     trailing group is the fraction.
 
     Costco's React PDP splits the price across separate ``<span>``s — whole,
@@ -280,10 +172,10 @@ def _extract_offer_price(offers: object) -> Optional[float]:
 def _price_from_jsonld(raw: str) -> Optional[float]:
     """Pull an offer price out of a schema.org JSON-LD blob, or None.
 
-    Costco's ``/p/`` pages embed product data as ``application/ld+json``. The
-    price lives under an ``offers`` key, but the surrounding shape varies (a bare
-    Product, a ``@graph`` list of nodes, nested arrays), so walk the whole parsed
-    structure for the first ``offers`` rather than hard-coding one layout."""
+    Storefronts embed product data as ``application/ld+json``. The price lives
+    under an ``offers`` key, but the surrounding shape varies (a bare Product, a
+    ``@graph`` list of nodes, nested arrays), so walk the whole parsed structure
+    for the first ``offers`` rather than hard-coding one layout."""
     try:
         data = json.loads(raw)
     except (ValueError, TypeError):
@@ -309,30 +201,97 @@ def _price_from_jsonld(raw: str) -> Optional[float]:
     return walk(data)
 
 
-def looks_like_challenge(text: str, url: str = "") -> bool:
+def looks_like(text: str, url: str, markers: tuple[str, ...]) -> bool:
+    """True if any marker appears (case-insensitively) in the page text or URL."""
     haystack = f"{text}\n{url}".lower()
-    return any(marker in haystack for marker in _CHALLENGE_MARKERS)
+    return any(marker in haystack for marker in markers)
 
 
-def looks_like_signin(text: str, url: str = "") -> bool:
-    haystack = f"{text}\n{url}".lower()
-    return any(marker in haystack for marker in _SIGNIN_MARKERS)
-
-
-class CostcoPurchaser:
+class BasePurchaser:
     """Drives one purchase per :meth:`buy` call, launching a fresh persistent
-    context each time so no stale checkout state leaks between orders."""
+    context each time so no stale checkout state leaks between orders.
 
-    def __init__(self, config: Config) -> None:
+    Provider specifics (selectors, markers, checkout step order, sign-in nav)
+    live in the subclass class-attributes and overrides below; the shared launch
+    stealth, the ``buy`` skeleton, price reading, and the click/wait/challenge
+    helpers all live here.
+    """
+
+    # ─────────── provider identity (override) ───────────
+    PROVIDER = ""  # "costco" / "amazon"
+    STORE_NAME = ""  # "Costco" / "Amazon"
+
+    # ─────────── DOM constants (override) ───────────
+    PRICE_SELECTORS: tuple[str, ...] = ()
+    PRICE_META_SELECTORS: tuple[str, ...] = ()
+    ADD_TO_CART_SELECTORS: tuple[str, ...] = ()
+    BUY_NOW_SELECTORS: tuple[str, ...] = ()
+    PLACE_ORDER_SELECTORS: tuple[str, ...] = ()
+    ORDER_TOTAL_SELECTORS: tuple[str, ...] = ()
+    SIGNIN_SUBMIT_SELECTORS: tuple[str, ...] = ()
+    ACCOUNT_NAV_SELECTORS: tuple[str, ...] = ()
+    CHALLENGE_MARKERS: tuple[str, ...] = ()
+    SIGNIN_MARKERS: tuple[str, ...] = ()
+    # Sold-out / not-carried / not-found markers that drive the Amazon fallback.
+    OUT_OF_STOCK_MARKERS: tuple[str, ...] = ()
+    NOT_FOUND_MARKERS: tuple[str, ...] = ()
+    ORDER_ID_RE = re.compile(r"\b\d{9,12}\b")
+
+    def __init__(self, config: Config, *, profile_dir: Path, domain: str) -> None:
         self.config = config
+        self.profile_dir = profile_dir
+        self.domain = domain
         config.shots_dir.mkdir(parents=True, exist_ok=True)
+
+    # ─────────── provider hooks (override) ───────────
+
+    def _resolve_url(self, source: object) -> str:
+        """The product URL for ``source`` — its own ``url`` or a store fallback."""
+        raise NotImplementedError
+
+    def _source_label(self, source: object) -> str:
+        """A short id for log/probe messages, e.g. ``item #1640526``."""
+        raise NotImplementedError
+
+    def _start_checkout(self, page: object) -> bool:
+        """Reach the place-order review page from the product page."""
+        raise NotImplementedError
+
+    def is_logged_in(self, page: object) -> bool:
+        """Best-effort sign-in check via the store's account nav.
+
+        Both stores' nav reads a 'Sign In'/'Register' affordance when logged out
+        and a greeting otherwise. Returns False if the nav can't be read, so a
+        True is trustworthy but a False may be a miss."""
+        for sel in self.ACCOUNT_NAV_SELECTORS:
+            try:
+                loc = page.locator(sel).first  # type: ignore[attr-defined]
+                if loc.count() == 0:
+                    continue
+                text = loc.inner_text(timeout=2_000)
+            except Exception:  # noqa: BLE001 — try the next candidate
+                continue
+            text = text.lower()
+            return "sign in" not in text and "register" not in text
+        return False
+
+    def ensure_logged_in(self, page: object) -> bool:
+        """Make sure the session is authenticated. Base: just report the state.
+
+        Stores that re-establish a session from cached credentials (Costco)
+        override this with a click flow; otherwise we rely on the persistent
+        profile already holding a live session and bail to the manual-login
+        message when it doesn't."""
+        return self.is_logged_in(page)
+
+    # ─────────── launch / paths ───────────
 
     def _launch_args(self) -> list[str]:
         # The worker runs unattended from a systemd service, so its headed
         # Chromium window is never presented/foregrounded — it opens occluded
         # (which is also why no window appears for an HA-triggered buy). For a
         # backgrounded window Chromium throttles requestAnimationFrame and
-        # background timers to a crawl, so Costco's JS never hydrates the
+        # background timers to a crawl, so the store's JS never hydrates the
         # checkout body: the page stays a bare header bar, the Place Order
         # button never enters the DOM, and the buy fails on a blank page. These
         # flags make a headed-but-occluded window keep rendering at full speed,
@@ -360,8 +319,8 @@ class CostcoPurchaser:
     def _launch_context(self, pw: object) -> "BrowserContext":
         """Launch the persistent context with the anti-bot configuration.
 
-        Single source of truth for both ``buy`` and ``login`` so they present
-        an identical browser to Akamai. The stealth-relevant choices:
+        Single source of truth for ``buy``, ``dump_dom`` and ``login`` so they
+        present an identical browser to the store. The stealth-relevant choices:
 
         * **Real Google Chrome, not bundled Chromium** — ``executable_path``
           (a pinned binary, e.g. the NixOS google-chrome) wins; else
@@ -377,7 +336,7 @@ class CostcoPurchaser:
           worse tell than the honest default, so we never set one.
         """
         kwargs: dict[str, object] = {
-            "user_data_dir": str(self.config.profile_dir),
+            "user_data_dir": str(self.profile_dir),
             "headless": False,
             "args": self._launch_args(),
             "ignore_default_args": ["--enable-automation"],
@@ -391,21 +350,29 @@ class CostcoPurchaser:
 
     def _shot_path(self, item_key: str, tag: str) -> Path:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        return self.config.shots_dir / f"{stamp}_{item_key}_{tag}.png"
+        return self.config.shots_dir / f"{stamp}_{self.PROVIDER}_{item_key}_{tag}.png"
+
+    # ─────────── buy ───────────
 
     def buy(
         self,
         item_key: str,
-        item: CatalogItem,
+        item: object,
+        source: object,
         proceed_check: ProceedCheck,
     ) -> PurchaseResult:
-        """Execute (or dry-run) the buy. Always returns a PurchaseResult;
-        the only exceptions that escape are programmer errors, not Costco
-        flakiness — those become a ``failed`` result with a screenshot."""
+        """Execute (or dry-run) the buy of ``source`` for ``item``.
+
+        Always returns a PurchaseResult; the only exceptions that escape are
+        programmer errors, not store flakiness — those become a ``failed`` result
+        with a screenshot. A ``unavailable`` result (sold out / not carried /
+        not found) signals the orchestrator to try the other store.
+        """
         api = _playwright_api()
         PWTimeout = api.TimeoutError  # type: ignore[attr-defined]
 
-        url = item.url or self.config.product_url(item.item_number)
+        url = self._resolve_url(source)
+        title = getattr(item, "title", item_key)
 
         with api.sync_playwright() as pw:  # type: ignore[attr-defined]
             context = self._launch_context(pw)
@@ -419,31 +386,56 @@ class CostcoPurchaser:
             except Exception:  # noqa: BLE001 — purely an optimisation
                 pass
             try:
-                page.goto(url, wait_until="domcontentloaded")
+                resp = page.goto(url, wait_until="domcontentloaded")
+                http_status = getattr(resp, "status", None) if resp is not None else None
 
                 if self._is_challenge(page):
                     return self._challenge(page, item_key, "product")
+                # A 404 means the product isn't carried — bail to `unavailable`
+                # (→ fall back) *before* the login step, since a not-found page
+                # often lacks the account nav and would otherwise misfire as a
+                # sign-in wall.
+                if http_status == 404:
+                    shot = self._screenshot(page, item_key, "unavailable")
+                    return PurchaseResult(
+                        status="unavailable",
+                        message=f"{title} not found (404) at {self.STORE_NAME}",
+                        screenshot=shot,
+                    )
                 # A logged-out profile renders the product page fine (the header
-                # just shows "Sign In / Register"), so don't read it as a wall —
-                # sign in with the cached credentials, then reload so the price
-                # and checkout run against the authenticated session.
+                # just shows a sign-in link), so don't read it as a wall — sign
+                # in (Costco re-establishes from cached credentials), then reload
+                # so the price and checkout run against the authenticated session.
                 if not self.ensure_logged_in(page):
                     return self._signin_required(page, item_key, "product")
                 page.goto(url, wait_until="domcontentloaded")
                 if self._is_challenge(page):
                     return self._challenge(page, item_key, "product")
 
+                # ── availability (drives the fallback) ──
+                # Check before the price read: a 404 / sold-out page may carry no
+                # price, and we want `unavailable` (fall back), not `failed`.
+                self._settle(page)
+                reason = self._check_availability(page, http_status)
+                if reason is not None:
+                    shot = self._screenshot(page, item_key, "unavailable")
+                    return PurchaseResult(
+                        status="unavailable",
+                        message=f"{title} {reason} at {self.STORE_NAME}",
+                        screenshot=shot,
+                    )
+
                 # ── price + guards ──
                 # Same JS-hydration race as checkout: the price block can paint
                 # after domcontentloaded, so wait for it before reading or a
                 # live product reads as "no price".
-                self._wait_for_any(page, _PRICE_SELECTORS)
+                self._wait_for_any(page, self.PRICE_SELECTORS)
                 price = self._read_price(page)
                 if price is None:
                     shot = self._screenshot(page, item_key, "no_price")
                     return PurchaseResult(
                         status="failed",
-                        message=f"couldn't read a price for {item.title}",
+                        message=f"couldn't read a price for {title}",
                         screenshot=shot,
                     )
 
@@ -485,12 +477,12 @@ class CostcoPurchaser:
                     )
 
                 # ── place the order ──
-                # Costco renders the checkout body via JS *after*
+                # The store renders the checkout body via JS *after*
                 # domcontentloaded, so the button isn't in the DOM the instant
                 # we arrive. Settle first (the same wait the dry-run review shot
                 # relies on — without it the body is a blank header), then let
                 # _place_order wait on the button itself. (Don't pre-wait on
-                # _PLACE_ORDER_SELECTORS here: the CSS ids may drift between
+                # PLACE_ORDER_SELECTORS here: the CSS ids may drift between
                 # checkout variants, so the wait could burn the whole step
                 # timeout and the checkout session blanks out before we click.)
                 self._settle(page)
@@ -498,7 +490,7 @@ class CostcoPurchaser:
                     # A slow render, a sign-in wall, or a challenge can all land
                     # us here with no button. Re-check the latter two so the
                     # operator gets the right next step, not a misleading
-                    # "couldn't find Place Your Order". Settle again so the
+                    # "couldn't find Place Order". Settle again so the
                     # diagnostic shot shows the real page, not a blank header.
                     if self._is_signin(page):
                         return self._signin_required(page, item_key, "checkout")
@@ -531,7 +523,7 @@ class CostcoPurchaser:
                     order_total=total,
                     order_id=order_id,
                     message=(
-                        f"ordered {item.title} — ${(total or price):.2f}"
+                        f"ordered {title} — ${(total or price):.2f}"
                         + (f" — #{order_id}" if order_id else "")
                     ),
                 )
@@ -554,19 +546,60 @@ class CostcoPurchaser:
             finally:
                 context.close()
 
-    def dump_dom(self, item_key: str, item: CatalogItem) -> DumpResult:
-        """Open ITEM_KEY's product page read-only and dump the rendered DOM.
+    # ─────────── availability ───────────
 
-        A bring-up aid for confirming the ``# TODO(costco): verify against live
-        DOM`` selectors against the real page instead of guessing. It stops at
-        the product page — it never adds to cart or places an order — reusing
-        buy()'s logged-in profile and stealth launch. Writes the rendered HTML,
-        a probe of every candidate selector group (see :data:`_PROBE_GROUPS`),
-        and a screenshot to ``shots_dir``. Best-effort throughout: a challenge or
-        a logged-out profile still dumps whatever painted, flagged in the result.
+    def _check_availability(self, page: object, http_status: Optional[int]) -> Optional[str]:
+        """Return a human reason when the product can't be ordered here, else None.
+
+        Drives the Amazon fallback: a 404, a not-found page, a sold-out marker,
+        or a disabled add-to-cart button all mean "try the other store". Pure
+        read-only and best-effort — a miss returns None and the buy proceeds.
+        """
+        if http_status == 404:
+            return "not found (404)"
+        try:
+            body = page.locator("body").inner_text(timeout=3_000)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — can't read the body; assume available
+            body = ""
+        if looks_like(body, "", self.NOT_FOUND_MARKERS):
+            return "not found"
+        if looks_like(body, "", self.OUT_OF_STOCK_MARKERS):
+            return "is out of stock"
+        if self._add_to_cart_disabled(page):
+            return "is out of stock (add-to-cart unavailable)"
+        return None
+
+    def _add_to_cart_disabled(self, page: object) -> bool:
+        """True only when an add-to-cart control is present *and* disabled.
+
+        An absent button isn't treated as out-of-stock here (the selectors are
+        unverified guesses, so "not found" would false-positive on every page);
+        a present-but-disabled one is the reliable sold-out tell."""
+        for sel in self.ADD_TO_CART_SELECTORS:
+            try:
+                loc = page.locator(sel).first  # type: ignore[attr-defined]
+                if loc.count() == 0:
+                    continue
+                return bool(loc.is_disabled(timeout=2_000))
+            except Exception:  # noqa: BLE001 — try the next candidate
+                continue
+        return False
+
+    # ─────────── dump-dom (bring-up) ───────────
+
+    def dump_dom(self, item_key: str, item: object, source: object) -> DumpResult:
+        """Open the product page read-only and dump the rendered DOM.
+
+        A bring-up aid for confirming the ``# TODO: verify against live DOM``
+        selectors against the real page instead of guessing. It stops at the
+        product page — it never adds to cart or places an order — reusing buy()'s
+        logged-in profile and stealth launch. Writes the rendered HTML, a probe
+        of every candidate selector group, and a screenshot to ``shots_dir``.
+        Best-effort throughout: a challenge or a logged-out profile still dumps
+        whatever painted, flagged in the result.
         """
         api = _playwright_api()
-        url = item.url or self.config.product_url(item.item_number)
+        url = self._resolve_url(source)
         result = DumpResult()
 
         with api.sync_playwright() as pw:  # type: ignore[attr-defined]
@@ -605,13 +638,24 @@ class CostcoPurchaser:
 
     def _write_text(self, item_key: str, tag: str, ext: str, content: str) -> Optional[Path]:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        path = self.config.shots_dir / f"{stamp}_{item_key}_{tag}.{ext}"
+        path = self.config.shots_dir / f"{stamp}_{self.PROVIDER}_{item_key}_{tag}.{ext}"
         try:
             path.write_text(content, encoding="utf-8")
             return path
         except Exception as exc:  # noqa: BLE001
             _logger.warning("write %s failed: %s", tag, exc)
             return None
+
+    def _probe_groups(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        return (
+            ("price", self.PRICE_SELECTORS),
+            ("price-meta", self.PRICE_META_SELECTORS),
+            ("add-to-cart", self.ADD_TO_CART_SELECTORS),
+            ("buy-now", self.BUY_NOW_SELECTORS),
+            ("place-order", self.PLACE_ORDER_SELECTORS),
+            ("order-total", self.ORDER_TOTAL_SELECTORS),
+            ("signin-submit", self.SIGNIN_SUBMIT_SELECTORS),
+        )
 
     def _probe_selectors(self, page: object) -> str:
         """Human-readable report of which candidate selectors resolve on ``page``.
@@ -631,7 +675,7 @@ class CostcoPurchaser:
         lines.append(f"logged_in:   {self.is_logged_in(page)}")
         lines.append(f"read_price:  {self._read_price(page)}")
         lines.append("")
-        for label, selectors in _PROBE_GROUPS:
+        for label, selectors in self._probe_groups():
             lines.append(f"[{label}]")
             lines.extend(self._probe_one(page, sel) for sel in selectors)
             lines.append("")
@@ -669,24 +713,27 @@ class CostcoPurchaser:
         sample = " ".join(sample.split())[:80]
         return f"  {selector}  count={count}  sample={sample!r}"
 
-    def login(self, wait_for_operator: Callable[[object], None]) -> None:
-        """Open the persistent profile headed so the operator can sign into
-        Costco by hand. Cookies persist in ``profile_dir``; roomieorder never
-        stores a Costco credential of its own (PLAN §1).
+    # ─────────── login ───────────
 
-        ``wait_for_operator(page)`` is invoked once the Costco home page has
-        loaded and must *block* until the human is done — the context (and the
-        saved session with it) is torn down as soon as it returns.
+    def login(self, wait_for_operator: Callable[[object], None]) -> None:
+        """Open the persistent profile headed so the operator can sign in by hand.
+
+        Cookies persist in ``profile_dir``; roomieorder never stores a store
+        credential of its own (PLAN §1).
+
+        ``wait_for_operator(page)`` is invoked once the store home page has loaded
+        and must *block* until the human is done — the context (and the saved
+        session with it) is torn down as soon as it returns.
         """
         api = _playwright_api()
 
-        self.config.profile_dir.mkdir(parents=True, exist_ok=True)
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
         with api.sync_playwright() as pw:  # type: ignore[attr-defined]
             context = self._launch_context(pw)
             page = context.pages[0] if context.pages else context.new_page()
             try:
                 page.goto(
-                    f"https://www.{self.config.costco_domain}",
+                    f"https://www.{self.domain}",
                     wait_until="domcontentloaded",
                 )
                 wait_for_operator(page)
@@ -695,60 +742,8 @@ class CostcoPurchaser:
 
     # ─────────── page helpers ───────────
 
-    def is_logged_in(self, page: object) -> bool:
-        """Best-effort sign-in check: Costco's account nav reads
-        'Sign In / Register' when logged out and 'Hello, <name>' otherwise.
-        Returns False if the nav can't be read, so a True is trustworthy but a
-        False may be a miss.
-        TODO(costco): verify against live DOM — account-nav selector + wording.
-        """
-        for sel in ("[automation-id='accountMenuButton']", "#header-user", ".sign-in-link"):
-            try:
-                loc = page.locator(sel).first  # type: ignore[attr-defined]
-                if loc.count() == 0:
-                    continue
-                text = loc.inner_text(timeout=2_000)
-            except Exception:  # noqa: BLE001 — try the next candidate
-                continue
-            text = text.lower()
-            return "sign in" not in text and "register" not in text
-        return False
-
-    def ensure_logged_in(self, page: object) -> bool:
-        """Drive Costco's cached-credential sign-in if the profile is logged out.
-
-        Costco remembers the email *and* password in the persistent profile, but
-        does not treat a remembered profile as authenticated until the Sign In
-        button is clicked — a session that "has the cookies" still starts logged
-        out (see the costco-login-click-required note). So when `is_logged_in`
-        reads logged-out, open the logon page via the header "Sign In / Register"
-        link, let the form prefill, and click its Sign In submit. Stores no
-        credential — the click only submits what the browser already filled.
-
-        Returns True if logged in (already, or after the click), False if the
-        click sequence didn't take (caller bails with the manual-login message).
-        TODO(costco): verify against live DOM — sign-in link + logon submit."""
-        if self.is_logged_in(page):
-            return True
-        # Reach the logon form: the header link first, the logon URL as backstop.
-        if not self._click_by_role(page, ("link", "button"), "sign in"):
-            try:
-                page.goto(  # type: ignore[attr-defined]
-                    f"https://www.{self.config.costco_domain}/logon",
-                    wait_until="domcontentloaded",
-                )
-            except Exception:  # noqa: BLE001 — no way to reach the form; give up
-                return False
-        self._settle(page)
-        # Submit the prefilled form. Prefer the form's own submit control over a
-        # role/text match so we don't re-click the header "Sign In" link.
-        if not self._click_first(page, _SIGNIN_SUBMIT_SELECTORS):
-            self._click_by_role(page, ("button",), "sign in")
-        self._settle(page)
-        return self.is_logged_in(page)
-
     def _read_price(self, page: object) -> Optional[float]:
-        for sel in _PRICE_SELECTORS:
+        for sel in self.PRICE_SELECTORS:
             try:
                 loc = page.locator(sel).first  # type: ignore[attr-defined]
                 if loc.count() == 0:
@@ -759,7 +754,7 @@ class CostcoPurchaser:
             price = parse_price(text)
             if price is not None:
                 return price
-        # The visible price element couldn't be located (every _PRICE_SELECTORS
+        # The visible price element couldn't be located (every PRICE_SELECTORS
         # is an unverified guess against a DOM nobody here can see). Fall back to
         # the page's structured data, which is far less brittle.
         return self._read_price_from_metadata(page)
@@ -769,7 +764,7 @@ class CostcoPurchaser:
         element can't be located: OpenGraph/schema.org ``<meta>`` tags first,
         then JSON-LD ``offers``. Both are server-rendered into the initial HTML,
         so they're present even before the price block hydrates."""
-        for sel in _PRICE_META_SELECTORS:
+        for sel in self.PRICE_META_SELECTORS:
             try:
                 loc = page.locator(sel).first  # type: ignore[attr-defined]
                 if loc.count() == 0:
@@ -795,51 +790,10 @@ class CostcoPurchaser:
                 return price
         return None
 
-    def _start_checkout(self, page: object) -> bool:
-        """Add to cart → go to cart → checkout → (delivery/address) review.
-
-        Costco has no one-click Buy Now: the flow is add-to-cart, then the cart,
-        then a Checkout CTA, then possibly a delivery-method / address
-        confirmation before the place-order button. Role/text first for
-        resilience, CSS ids as a backstop.
-        TODO(costco): verify against live DOM — every step below.
-        """
-        # ── add to cart ──
-        # Costco often shows an "added to cart" flyout/interstitial after this.
-        if not self._click_by_role(page, ("button",), "add to cart") and not self._click_first(
-            page, _ADD_TO_CART_SELECTORS
-        ):
-            return False
-        page.wait_for_load_state("domcontentloaded")  # type: ignore[attr-defined]
-        self._settle(page)
-
-        # ── go to cart ──
-        # Prefer the flyout's Checkout CTA if present; otherwise navigate to the
-        # cart page directly and check out from there.
-        if not self._click_by_role(page, ("button", "link"), "checkout"):
-            # TODO(costco): verify against live DOM — cart URL.
-            page.goto(  # type: ignore[attr-defined]
-                f"https://www.{self.config.costco_domain}/CheckoutCartView",
-                wait_until="domcontentloaded",
-            )
-            self._settle(page)
-            if not self._click_by_role(page, ("button", "link"), "checkout"):
-                return False
-
-        # ── delivery / address confirmation → review ──
-        # A delivery-method / address step may sit before the place-order
-        # button. Settle, then click a "continue to review/payment" CTA if one
-        # is present; if not, we're already on the review page.
-        page.wait_for_load_state("domcontentloaded")  # type: ignore[attr-defined]
-        self._settle(page)
-        # TODO(costco): verify against live DOM — does delivery need a click?
-        self._click_by_role(page, ("button", "link"), "continue")
-        return True
-
     def _click_by_role(self, page: object, roles: tuple[str, ...], name: str) -> bool:
         """Click the first role/accessible-name match across ``roles``.
 
-        Costco labels the same control as a button or a link across variants, so
+        Stores label the same control as a button or a link across variants, so
         try each role with a case-insensitive name regex. Best-effort: returns
         False if nothing matches (the caller decides how to fail)."""
         pattern = re.compile(re.escape(name), re.I)
@@ -855,12 +809,11 @@ class CostcoPurchaser:
     def _place_order(self, page: object) -> bool:
         """Click Place Order, waiting on the button's *accessible name*.
 
-        CSS ids can drift between Costco's checkout variants, so keying off the
+        CSS ids can drift between a store's checkout variants, so keying off the
         ids alone could read as "couldn't find Place Order" even when the button
         is right there. The visible text is the most stable handle, so wait on
         the role-named button first and click it promptly — before the checkout
-        session goes stale — then fall back to the ids and a looser text match.
-        TODO(costco): verify against live DOM — final-button accessible name."""
+        session goes stale — then fall back to the ids and a looser text match."""
         name_re = re.compile(r"place (your )?order", re.I)
         btn = page.get_by_role("button", name=name_re)  # type: ignore[attr-defined]
         try:
@@ -869,7 +822,7 @@ class CostcoPurchaser:
             return True
         except Exception:  # noqa: BLE001 — fall through to the id/text fallbacks
             pass
-        if self._click_first(page, _PLACE_ORDER_SELECTORS):
+        if self._click_first(page, self.PLACE_ORDER_SELECTORS):
             return True
         try:
             page.get_by_text(name_re).first.click(timeout=5_000)  # type: ignore[attr-defined]
@@ -896,9 +849,11 @@ class CostcoPurchaser:
         """Block until any of ``selectors`` is visible, then return True.
 
         ``_click_first`` decides via an instantaneous ``count()`` snapshot, so a
-        control that Costco renders with JS *after* navigation reads as absent
+        control that the store renders with JS *after* navigation reads as absent
         and the click is skipped. This gives that JS time to paint. Returns
         False on timeout (the caller decides how to fail) rather than raising."""
+        if not selectors:
+            return False
         try:
             page.wait_for_selector(", ".join(selectors), timeout=timeout)  # type: ignore[attr-defined]
             return True
@@ -924,11 +879,11 @@ class CostcoPurchaser:
         except Exception:  # noqa: BLE001
             pass
         order_id = None
-        m = _ORDER_ID_RE.search(body)
+        m = self.ORDER_ID_RE.search(body)
         if m:
             order_id = m.group(0)
         total = None
-        for sel in _ORDER_TOTAL_SELECTORS:
+        for sel in self.ORDER_TOTAL_SELECTORS:
             try:
                 loc = page.locator(sel).first  # type: ignore[attr-defined]
                 if loc.count() == 0:
@@ -943,9 +898,9 @@ class CostcoPurchaser:
     def _settle(self, page: object) -> None:
         """Let a freshly-navigated page paint before we shoot it.
 
-        ``domcontentloaded`` fires before Costco's JS renders the checkout body,
-        so without this the screenshot is just the header bar over a blank white
-        page. Both waits are bounded and best-effort — Costco's checkout rarely
+        ``domcontentloaded`` fires before the store's JS renders the checkout
+        body, so without this the screenshot is just the header bar over a blank
+        white page. Both waits are bounded and best-effort — the checkout rarely
         goes fully ``networkidle``, so we cap it and shoot whatever we have."""
         for state in ("load", "networkidle"):
             try:
@@ -959,26 +914,27 @@ class CostcoPurchaser:
             url = page.url  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             return False
-        return looks_like_challenge(text, url)
+        return looks_like(text, url, self.CHALLENGE_MARKERS)
 
     def _is_signin(self, page: object) -> bool:
         try:
             url = page.url  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             return False
-        if "/logon" in url.lower() or "signin.costco.com" in url.lower():
-            return True
         try:
             text = page.locator("body").inner_text(timeout=3_000)  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
-            return False
-        return looks_like_signin(text, url)
+            text = ""
+        return looks_like(text, url, self.SIGNIN_MARKERS)
 
     def _challenge(self, page: object, item_key: str, where: str) -> PurchaseResult:
         shot = self._screenshot(page, item_key, f"challenge_{where}")
         return PurchaseResult(
             status="challenge",
-            message=f"⚠️ Costco challenge on the {where} page — worker paused, clear it manually",
+            message=(
+                f"⚠️ {self.STORE_NAME} challenge on the {where} page — "
+                "worker paused, clear it manually"
+            ),
             screenshot=shot,
         )
 
@@ -990,8 +946,8 @@ class CostcoPurchaser:
         return PurchaseResult(
             status="challenge",
             message=(
-                f"⚠️ Costco is logged out (hit the sign-in wall on the {where} page) — "
-                "run `roomieorder login`, then retry"
+                f"⚠️ {self.STORE_NAME} is logged out (hit the sign-in wall on the "
+                f"{where} page) — run `roomieorder login --provider {self.PROVIDER}`, then retry"
             ),
             screenshot=shot,
         )
@@ -1004,3 +960,306 @@ class CostcoPurchaser:
         except Exception as exc:  # noqa: BLE001
             _logger.warning("screenshot failed (%s): %s", tag, exc)
             return None
+
+
+class CostcoPurchaser(BasePurchaser):
+    """Costco — the first store tried for every item."""
+
+    PROVIDER = "costco"
+    STORE_NAME = "Costco"
+
+    # Verified against live DOM 2026-06-16 (paper_towels dump-dom): Costco's PDP is
+    # a MUI/React app keyed on `data-testid`. `single-price-content` (the sale
+    # price) is read first; the broader `[data-testid='price']` container also
+    # holds the promo strikethrough so its text would mis-parse. Legacy guesses
+    # are kept as backstops.
+    PRICE_SELECTORS = (
+        "[data-testid='single-price-content']",
+        "[data-testid='price']",
+        "[automation-id='productPriceOutput']",
+        ".product-price-amount",
+        ".product-price .value",
+        "span.value",
+    )
+    # Structured-data price sources, tried after the visible selectors miss; the
+    # server-rendered Next.js storefront emits these in the initial HTML.
+    PRICE_META_SELECTORS = (
+        "meta[property='product:price:amount']",
+        "meta[property='og:price:amount']",
+        "meta[itemprop='price']",
+    )
+    # Verified 2026-06-16: the PDP add-to-cart button is
+    # `[data-testid='Button_addToCartDrawer_pdp']`. Its accessible name is the
+    # product title, NOT "Add to Cart", so the role/text match misses and this
+    # CSS fallback is what actually clicks it. Legacy guesses kept as backstops.
+    ADD_TO_CART_SELECTORS = (
+        "[data-testid='Button_addToCartDrawer_pdp']",
+        "[automation-id='addToCartButton']",
+        "input[value='Add to Cart']",
+        "button#add-to-cart-btn",
+    )
+    # TODO(costco): verify against live DOM — final place-order button.
+    PLACE_ORDER_SELECTORS = (
+        "[automation-id='placeOrderButton']",
+        "input[value='Place Order']",
+        "button#place-order",
+    )
+    # TODO(costco): verify against live DOM — order-confirmation grand-total.
+    ORDER_TOTAL_SELECTORS = (
+        "[automation-id='orderTotalOutput']",
+        ".order-total .value",
+        ".grand-total .value",
+    )
+    # The remembered-credential logon form's submit control (see ensure_logged_in).
+    # TODO(costco): verify against live DOM — logon submit control.
+    SIGNIN_SUBMIT_SELECTORS = (
+        "[automation-id='signInButton']",
+        "input#sign-in-btn",
+        "button#sign-in-btn",
+        "button[type='submit']",
+    )
+    # TODO(costco): verify against live DOM — account-nav selector + wording.
+    ACCOUNT_NAV_SELECTORS = (
+        "[automation-id='accountMenuButton']",
+        "#header-user",
+        ".sign-in-link",
+    )
+    # Costco/Akamai bot wall. TODO(costco): verify against live DOM.
+    CHALLENGE_MARKERS = (
+        "access denied",
+        "pardon our interruption",
+        "verify you are human",
+        "are you a human",
+        "/_sec/",
+        "akamai",
+        "reference #",
+        "recaptcha",
+        "enter the characters",
+        "verify your identity",
+    )
+    # A logged-out session bounces to Costco's logon page at checkout. Detect by
+    # the logon URL/host; "sign in or register" (the page's own heading, with
+    # "or") is a body backstop. The header "Sign In / Register" link is on every
+    # page, so it deliberately isn't a marker. TODO(costco): verify against live DOM.
+    SIGNIN_MARKERS = (
+        "/logon",
+        "signin.costco.com",
+        "sign in or register",
+    )
+    # TODO(costco): verify against live DOM — sold-out / not-carried wording.
+    OUT_OF_STOCK_MARKERS = (
+        "out of stock",
+        "sold out",
+        "this item is currently unavailable",
+        "item is not available",
+    )
+    # TODO(costco): verify against live DOM — not-found page wording.
+    NOT_FOUND_MARKERS = (
+        "we can't find the page",
+        "page not found",
+        "the page you requested cannot be found",
+    )
+    # Costco web order numbers — best guess (purely digits, ~10).
+    # TODO(costco): verify against live DOM — confirm order-number format.
+    ORDER_ID_RE = re.compile(r"\b\d{9,12}\b")
+
+    def _resolve_url(self, source: object) -> str:
+        url = getattr(source, "url", "") or ""
+        return url or self.config.costco_product_url(getattr(source, "item_number"))
+
+    def _source_label(self, source: object) -> str:
+        return f"item #{getattr(source, 'item_number')}"
+
+    def ensure_logged_in(self, page: object) -> bool:
+        """Drive Costco's cached-credential sign-in if the profile is logged out.
+
+        Costco remembers the email *and* password in the persistent profile, but
+        does not treat a remembered profile as authenticated until the Sign In
+        button is clicked — a session that "has the cookies" still starts logged
+        out. So when `is_logged_in` reads logged-out, open the logon page via the
+        header "Sign In / Register" link, let the form prefill, and click its Sign
+        In submit. Stores no credential — the click only submits what the browser
+        already filled.
+
+        Returns True if logged in (already, or after the click), False if the
+        click sequence didn't take (caller bails with the manual-login message).
+        TODO(costco): verify against live DOM — sign-in link + logon submit."""
+        if self.is_logged_in(page):
+            return True
+        # Reach the logon form: the header link first, the logon URL as backstop.
+        if not self._click_by_role(page, ("link", "button"), "sign in"):
+            try:
+                page.goto(  # type: ignore[attr-defined]
+                    f"https://www.{self.domain}/logon",
+                    wait_until="domcontentloaded",
+                )
+            except Exception:  # noqa: BLE001 — no way to reach the form; give up
+                return False
+        self._settle(page)
+        # Submit the prefilled form. Prefer the form's own submit control over a
+        # role/text match so we don't re-click the header "Sign In" link.
+        if not self._click_first(page, self.SIGNIN_SUBMIT_SELECTORS):
+            self._click_by_role(page, ("button",), "sign in")
+        self._settle(page)
+        return self.is_logged_in(page)
+
+    def _start_checkout(self, page: object) -> bool:
+        """Add to cart → go to cart → checkout → (delivery/address) review.
+
+        Costco has no one-click Buy Now: the flow is add-to-cart, then the cart,
+        then a Checkout CTA, then possibly a delivery-method / address
+        confirmation before the place-order button. Role/text first for
+        resilience, CSS ids as a backstop.
+        TODO(costco): verify against live DOM — every step below.
+        """
+        # ── add to cart ──
+        if not self._click_by_role(page, ("button",), "add to cart") and not self._click_first(
+            page, self.ADD_TO_CART_SELECTORS
+        ):
+            return False
+        page.wait_for_load_state("domcontentloaded")  # type: ignore[attr-defined]
+        self._settle(page)
+
+        # ── go to cart ──
+        # Prefer the flyout's Checkout CTA if present; otherwise navigate to the
+        # cart page directly and check out from there.
+        if not self._click_by_role(page, ("button", "link"), "checkout"):
+            # TODO(costco): verify against live DOM — cart URL.
+            page.goto(  # type: ignore[attr-defined]
+                f"https://www.{self.domain}/CheckoutCartView",
+                wait_until="domcontentloaded",
+            )
+            self._settle(page)
+            if not self._click_by_role(page, ("button", "link"), "checkout"):
+                return False
+
+        # ── delivery / address confirmation → review ──
+        page.wait_for_load_state("domcontentloaded")  # type: ignore[attr-defined]
+        self._settle(page)
+        # TODO(costco): verify against live DOM — does delivery need a click?
+        self._click_by_role(page, ("button", "link"), "continue")
+        return True
+
+
+class AmazonPurchaser(BasePurchaser):
+    """Amazon — the fallback when Costco can't fulfil an item.
+
+    Restored from the pre-costco-switch buy flow (commit 9057046^). The DOM
+    moves fast and these selectors are multi-year-old guesses, so every one is
+    flagged ``TODO(amazon)`` and must be confirmed via
+    `roomieorder dump-dom --provider amazon <item>` before any live order.
+    """
+
+    PROVIDER = "amazon"
+    STORE_NAME = "Amazon"
+
+    # TODO(amazon): verify against live DOM — PDP price block.
+    PRICE_SELECTORS = (
+        "#corePriceDisplay_desktop_feature_div span.a-offscreen",
+        "#corePrice_feature_div span.a-offscreen",
+        "#priceblock_ourprice",
+        "#priceblock_dealprice",
+        "span.a-price span.a-offscreen",
+    )
+    PRICE_META_SELECTORS = (
+        "meta[property='product:price:amount']",
+        "meta[property='og:price:amount']",
+        "meta[itemprop='price']",
+    )
+    # TODO(amazon): verify against live DOM — Buy Now / Add to Cart / proceed.
+    BUY_NOW_SELECTORS = (
+        "#buy-now-button",
+        "input[name='submit.buy-now']",
+        "#submit\\.buy-now",
+    )
+    ADD_TO_CART_SELECTORS = (
+        "#add-to-cart-button",
+        "input[name='submit.add-to-cart']",
+    )
+    # TODO(amazon): verify against live DOM — final place-order button.
+    PLACE_ORDER_SELECTORS = (
+        "#placeYourOrder",
+        "input[name='placeYourOrder1']",
+        "#submitOrderButtonId input",
+        "#bottomSubmitOrderButtonId input",
+    )
+    # TODO(amazon): verify against live DOM — order-confirmation grand-total.
+    ORDER_TOTAL_SELECTORS = (
+        "#subtotals-marketplace-table .grand-total-price",
+        "td.grand-total-price",
+        "#od-subtotals .a-color-price",
+    )
+    # TODO(amazon): verify against live DOM — account nav (reads "Hello, sign in"
+    # when logged out).
+    ACCOUNT_NAV_SELECTORS = (
+        "#nav-link-accountList-nav-line-1",
+        "#nav-link-accountList",
+    )
+    # Markers that mean Amazon wants a human: CAPTCHA, OTP, "verify it's you".
+    # TODO(amazon): verify against live DOM.
+    CHALLENGE_MARKERS = (
+        "enter the characters",
+        "type the characters",
+        "type the letters",
+        "solve this puzzle",
+        "verify it's you",
+        "verify your identity",
+        "authentication required",
+        "two-step verification",
+        "enter the otp",
+        "/ap/cvf/",
+        "validatecaptcha",
+        "/errors/validatecaptcha",
+    )
+    # A logged-out profile gets bounced to the sign-in wall at checkout.
+    # TODO(amazon): verify against live DOM.
+    SIGNIN_MARKERS = (
+        "/ap/signin",
+        "sign in or create account",
+        "enter mobile number or email",
+    )
+    # TODO(amazon): verify against live DOM — currently-unavailable wording.
+    OUT_OF_STOCK_MARKERS = (
+        "currently unavailable",
+        "out of stock",
+        "we don't know when or if this item will be back in stock",
+        "temporarily out of stock",
+    )
+    # TODO(amazon): verify against live DOM — not-found / dogs-of-amazon page.
+    NOT_FOUND_MARKERS = (
+        "page not found",
+        "we couldn't find that page",
+        "looking for something",
+        "sorry! we couldn't find that page",
+    )
+    # Amazon order numbers look like 123-4567890-1234567.
+    ORDER_ID_RE = re.compile(r"\b\d{3}-\d{7}-\d{7}\b")
+
+    def _resolve_url(self, source: object) -> str:
+        url = getattr(source, "url", "") or ""
+        return url or self.config.amazon_product_url(getattr(source, "asin"))
+
+    def _source_label(self, source: object) -> str:
+        return f"ASIN {getattr(source, 'asin')}"
+
+    def _start_checkout(self, page: object) -> bool:
+        """Click Buy Now; fall back to Add to Cart → Proceed to checkout.
+        TODO(amazon): verify against live DOM — every step below.
+        """
+        if self._click_first(page, self.BUY_NOW_SELECTORS):
+            return True
+        if not self._click_first(page, self.ADD_TO_CART_SELECTORS):
+            return False
+        # Cart interstitial → checkout.
+        page.wait_for_load_state("domcontentloaded")  # type: ignore[attr-defined]
+        for sel in ("#sc-buy-box-ptc-button", "input[name='proceedToRetailCheckout']"):
+            if self._click_first(page, (sel,)):
+                return True
+        # Some flows expose a role-named link instead.
+        try:
+            page.get_by_role(  # type: ignore[attr-defined]
+                "link", name=re.compile("proceed to checkout", re.I)
+            ).first.click(timeout=5_000)
+            return True
+        except Exception:  # noqa: BLE001
+            return False

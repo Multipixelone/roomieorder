@@ -75,7 +75,7 @@ in
 
     catalogFile = lib.mkOption {
       type = lib.types.path;
-      description = "Path to catalog.json (item_key → item_number/price/cooldown).";
+      description = "Path to catalog.json (item_key → costco/amazon sources + cooldown).";
     };
 
     environmentFile = lib.mkOption {

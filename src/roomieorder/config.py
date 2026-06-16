@@ -77,8 +77,9 @@ class Config(BaseModel):
     profile_dir: Path = Path("data/profile")
     shots_dir: Path = Path("data/shots")
 
-    # Costco
+    # Stores
     costco_domain: str = "costco.com"
+    amazon_domain: str = "amazon.com"
     wayland: bool = False
 
     # Browser / anti-bot. Akamai fingerprints the *real* browser build, so the
@@ -110,15 +111,33 @@ class Config(BaseModel):
     def notify_enabled(self) -> bool:
         return bool(self.openclaw_target)
 
-    def product_url(self, item_number: str) -> str:
-        """Fallback product URL for an item number on the configured domain.
+    @property
+    def costco_profile_dir(self) -> Path:
+        """Browser profile dir for the Costco session (logged in by hand once).
+
+        Each store gets its own profile so their cookies and anti-bot state stay
+        isolated — Costco's Akamai and Amazon's checks key on different signals.
+        """
+        return self.profile_dir / "costco"
+
+    @property
+    def amazon_profile_dir(self) -> Path:
+        """Browser profile dir for the Amazon session (the Costco fallback)."""
+        return self.profile_dir / "amazon"
+
+    def costco_product_url(self, item_number: str) -> str:
+        """Fallback Costco product URL for an item number on the configured domain.
 
         Costco has no clean ``/dp/<id>`` form: a real product URL carries a
-        slug (``.../kirkland-…product.<id>.html``). Prefer ``item.url`` from the
-        catalog, which has the slug; this slugless form is only a last resort.
+        slug (``.../kirkland-…product.<id>.html``). Prefer the source ``url``
+        from the catalog, which has the slug; this slugless form is a last resort.
         """
         # TODO(costco): confirm the slugless .product.<id>.html form redirects.
         return f"https://www.{self.costco_domain}/.product.{item_number}.html"
+
+    def amazon_product_url(self, asin: str) -> str:
+        """Product URL for an Amazon ASIN on the configured domain."""
+        return f"https://www.{self.amazon_domain}/dp/{asin}"
 
 
 def load_config() -> Config:
@@ -141,6 +160,7 @@ def load_config() -> Config:
         profile_dir=Path(_env_str("ROOMIEORDER_PROFILE_DIR", "data/profile")),
         shots_dir=Path(_env_str("ROOMIEORDER_SHOTS_DIR", "data/shots")),
         costco_domain=_env_str("ROOMIEORDER_COSTCO_DOMAIN", "costco.com"),
+        amazon_domain=_env_str("ROOMIEORDER_AMAZON_DOMAIN", "amazon.com"),
         wayland=_env_bool("ROOMIEORDER_WAYLAND", False),
         chrome_path=_env_str("ROOMIEORDER_CHROME_PATH", ""),
         chrome_channel=_env_str("ROOMIEORDER_CHROME_CHANNEL", "chrome"),

@@ -8,35 +8,30 @@ from fastapi.testclient import TestClient
 
 from roomieorder.catalog import CatalogItem
 from roomieorder.config import Config
-from roomieorder.guards import GuardResult
 from roomieorder.purchase import PurchaseResult
-from roomieorder.store import Status
+from roomieorder.store import Status, Store
 
 
-class FakePurchaser:
-    """Stand-in for CostcoPurchaser — never launches a browser.
+class FakeOrchestrator:
+    """Stand-in for Orchestrator — never launches a browser.
 
-    Honours the proceed_check callback (so guard wiring is exercised) and
-    returns whatever ``result_status`` the test asked for.
+    Returns whatever ``result_status`` the test asked for, with a costco
+    provider, so the worker-loop/intake wiring is exercised without Playwright.
+    The Costco→Amazon fallback itself is covered in test_orchestrator.py.
     """
 
     result_status: Status = "dry_run"
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, store: Store) -> None:
         self.config = config
+        self.store = store
 
-    def buy(self, item_key: str, item: CatalogItem, proceed_check):  # type: ignore[no-untyped-def]
-        decision: GuardResult = proceed_check(item.expected_price)
-        if not decision.ok:
-            status: Status = decision.status if decision.status is not None else "failed"
-            return PurchaseResult(
-                status=status,
-                unit_price=item.expected_price,
-                message=decision.reason,
-            )
+    def buy(self, item_key: str, item: CatalogItem):  # type: ignore[no-untyped-def]
+        price = item.costco.expected_price if item.costco else item.amazon.expected_price  # type: ignore[union-attr]
         return PurchaseResult(
             status=self.result_status,
-            unit_price=item.expected_price,
+            unit_price=price,
+            provider="costco",
             message=f"[fake] {self.result_status} {item_key}",
         )
 
@@ -45,7 +40,7 @@ class FakePurchaser:
 def client(config: Config, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     # Fast worker tick + no real browser.
     monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
-    monkeypatch.setattr("roomieorder.main.CostcoPurchaser", FakePurchaser)
+    monkeypatch.setattr("roomieorder.main.Orchestrator", FakeOrchestrator)
     from roomieorder.main import create_app
 
     app = create_app(config)
@@ -116,8 +111,8 @@ def test_items_reports_cooldown(client: TestClient) -> None:
 
 def test_worker_pauses_on_challenge(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
-    monkeypatch.setattr("roomieorder.main.CostcoPurchaser", FakePurchaser)
-    FakePurchaser.result_status = "challenge"
+    monkeypatch.setattr("roomieorder.main.Orchestrator", FakeOrchestrator)
+    FakeOrchestrator.result_status = "challenge"
     try:
         from roomieorder.main import create_app
 
@@ -129,4 +124,4 @@ def test_worker_pauses_on_challenge(config: Config, monkeypatch: pytest.MonkeyPa
                 time.sleep(0.05)
             assert c.get("/health").json()["paused"] is True
     finally:
-        FakePurchaser.result_status = "dry_run"
+        FakeOrchestrator.result_status = "dry_run"

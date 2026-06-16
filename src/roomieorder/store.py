@@ -27,6 +27,9 @@ Status = Literal[
     "skipped_debounce",
     "price_blocked",
     "spend_capped",
+    # Product is sold out / not carried / not found at the store. On the Costco
+    # leg this triggers the Amazon fallback; on the last provider it's terminal.
+    "unavailable",
     "failed",
     "challenge",
 ]
@@ -59,6 +62,8 @@ class QueueRow(BaseModel):
     unit_price: Optional[float] = None
     order_total: Optional[float] = None
     order_id: Optional[str] = None
+    # Which store fulfilled (or last attempted) the order: "costco"/"amazon".
+    provider: str = ""
     notes: str = ""
 
 
@@ -74,6 +79,7 @@ CREATE TABLE IF NOT EXISTS queue (
     unit_price  REAL,
     order_total REAL,
     order_id    TEXT,
+    provider    TEXT    NOT NULL DEFAULT '',
     notes       TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_queue_status  ON queue(status);
@@ -108,7 +114,22 @@ class Store:
 
     def init_db(self) -> None:
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Bring an existing DB up to the current schema, idempotently.
+
+        ``CREATE TABLE IF NOT EXISTS`` never alters a table that already exists,
+        so columns added after a deployment's first boot need an explicit guarded
+        ``ALTER TABLE`` here. Re-runnable: each add is skipped when the column is
+        already present.
+        """
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(queue)")}
+        if "provider" not in cols:
+            self._conn.execute(
+                "ALTER TABLE queue ADD COLUMN provider TEXT NOT NULL DEFAULT ''"
+            )
 
     def close(self) -> None:
         self._conn.close()
@@ -156,6 +177,7 @@ class Store:
         unit_price: Optional[float] = None,
         order_total: Optional[float] = None,
         order_id: Optional[str] = None,
+        provider: Optional[str] = None,
         notes: Optional[str] = None,
     ) -> None:
         """Set a row's terminal status and any scraped fields.
@@ -169,6 +191,7 @@ class Store:
             ("unit_price", unit_price),
             ("order_total", order_total),
             ("order_id", order_id),
+            ("provider", provider),
             ("notes", notes),
         ):
             if val is not None:
@@ -263,5 +286,6 @@ class Store:
             unit_price=row["unit_price"],
             order_total=row["order_total"],
             order_id=row["order_id"],
+            provider=row["provider"] or "",
             notes=row["notes"] or "",
         )

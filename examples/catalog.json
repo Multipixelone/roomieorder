@@ -3,33 +3,51 @@
     "title": "Bounty Advanced Paper Towels, 12 Family Rolls",
     "button": "Paper Towels",
     "icon": "mdi:paper-roll",
-    "item_number": "1640526",
-    "url": "https://www.costco.com/bounty-advanced-paper-towels.product.1640526.html",
     "qty": 1,
-    "expected_price": 26.99,
-    "price_ceiling": 34.00,
-    "cooldown_days": 10
+    "cooldown_days": 10,
+    "costco": {
+      "item_number": "1640526",
+      "url": "https://www.costco.com/bounty-advanced-paper-towels.product.1640526.html",
+      "expected_price": 26.99,
+      "price_ceiling": 34.00
+    },
+    "amazon": {
+      "asin": "B07YYYYYYY",
+      "url": "https://www.amazon.com/dp/B07YYYYYYY",
+      "expected_price": 24.99,
+      "price_ceiling": 32.00
+    }
   },
   "toilet_paper": {
     "title": "Kirkland Signature Bath Tissue, 30 Rolls",
     "button": "Toilet Paper",
     "icon": "mdi:toilet",
-    "item_number": "1313514",
-    "url": "https://www.costco.com/kirkland-signature-bath-tissue.product.1313514.html",
     "qty": 1,
-    "expected_price": 24.99,
-    "price_ceiling": 32.00,
-    "cooldown_days": 14
+    "cooldown_days": 14,
+    "costco": {
+      "item_number": "1313514",
+      "url": "https://www.costco.com/kirkland-signature-bath-tissue.product.1313514.html",
+      "expected_price": 24.99,
+      "price_ceiling": 32.00
+    }
   },
   "dish_soap": {
     "title": "Dawn Ultra Dishwashing Liquid, 2 x 56 fl oz",
     "button": "Dish Soap",
     "icon": "mdi:bottle-tonic",
-    "item_number": "1308124",
-    "url": "https://www.costco.com/dawn-ultra-dishwashing-liquid.product.1308124.html",
     "qty": 1,
-    "expected_price": 14.99,
-    "price_ceiling": 19.00,
-    "cooldown_days": 21
+    "cooldown_days": 21,
+    "costco": {
+      "item_number": "1308124",
+      "url": "https://www.costco.com/dawn-ultra-dishwashing-liquid.product.1308124.html",
+      "expected_price": 14.99,
+      "price_ceiling": 19.00
+    },
+    "amazon": {
+      "asin": "B07WWWWWWW",
+      "url": "https://www.amazon.com/dp/B07WWWWWWW",
+      "expected_price": 11.99,
+      "price_ceiling": 16.00
+    }
   }
 }

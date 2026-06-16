@@ -23,11 +23,12 @@ from typing import AsyncIterator, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from roomieorder.catalog import Catalog, load_catalog
+from roomieorder.catalog import Catalog, CatalogItem, load_catalog
 from roomieorder.config import Config, load_config
-from roomieorder.guards import check_intake, check_price_ceiling, check_spend_cap
+from roomieorder.guards import check_intake
 from roomieorder.notify import Notifier, build_notifier
-from roomieorder.purchase import CostcoPurchaser, PurchaseResult
+from roomieorder.orchestrator import Orchestrator
+from roomieorder.purchase import PurchaseResult
 from roomieorder.sheets import SheetsClient, build_sheets
 from roomieorder.store import QueueRow, Store
 
@@ -38,6 +39,18 @@ _WORKER_POLL_SECONDS = 5.0
 
 # Outcomes that halt the worker until the operator clears them (PLAN §5).
 _PAUSE_STATUSES = {"challenge", "failed", "spend_capped"}
+
+
+def _product_id(item: CatalogItem, provider: str) -> str:
+    """The store-specific id of the source that handled the order, for Sheets.
+
+    Costco item number or Amazon ASIN, or '' when the provider is unknown (e.g.
+    an unavailable-everywhere result that never settled on a store)."""
+    if provider == "costco" and item.costco is not None:
+        return item.costco.item_number
+    if provider == "amazon" and item.amazon is not None:
+        return item.amazon.asin
+    return ""
 
 
 class ReorderRequest(BaseModel):
@@ -79,7 +92,7 @@ class Engine:
         self.store.init_db()
         self.notifier: Notifier = build_notifier(config)
         self.sheets: SheetsClient = build_sheets(config)
-        self.purchaser = CostcoPurchaser(config)
+        self.orchestrator = Orchestrator(config, self.store)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -122,19 +135,14 @@ class Engine:
             self.notifier.send(f"⚠️ unknown item_key {row.item_key!r} — skipped")
             return
 
-        def proceed_check(live_price: float):  # type: ignore[no-untyped-def]
-            ceiling = check_price_ceiling(item, live_price)
-            if not ceiling.ok:
-                return ceiling
-            return check_spend_cap(self.store, self.config, live_price * item.qty)
-
-        result = self.purchaser.buy(row.item_key, item, proceed_check)
+        result = self.orchestrator.buy(row.item_key, item)
         self.store.mark(
             row.id,
             result.status,
             unit_price=result.unit_price,
             order_total=result.order_total,
             order_id=result.order_id,
+            provider=result.provider,
             notes=result.message,
         )
         self._log_sheet(row, item, result)
@@ -183,7 +191,8 @@ class Engine:
                 "timestamp": row.updated_at.isoformat(),
                 "item_key": row.item_key,
                 "title": item.title,
-                "item_number": item.item_number,
+                "provider": result.provider,
+                "product_id": _product_id(item, result.provider),
                 "qty": item.qty,
                 "unit_price": result.unit_price,
                 "order_total": result.order_total,

@@ -5,18 +5,32 @@ import pytest
 from roomieorder.config import Config
 from roomieorder.purchase import (
     _JSONLD_SELECTOR,
-    _PLACE_ORDER_SELECTORS,
-    _PRICE_META_SELECTORS,
-    _PRICE_SELECTORS,
-    _SIGNIN_SUBMIT_SELECTORS,
+    AmazonPurchaser,
     CostcoPurchaser,
     _price_from_jsonld,
-    looks_like_challenge,
-    looks_like_signin,
+    looks_like,
     parse_price,
 )
 
-_ACCOUNT_NAV = "[automation-id='accountMenuButton']"
+# DOM constants now live as class attributes on each purchaser.
+_PRICE_SELECTORS = CostcoPurchaser.PRICE_SELECTORS
+_PRICE_META_SELECTORS = CostcoPurchaser.PRICE_META_SELECTORS
+_PLACE_ORDER_SELECTORS = CostcoPurchaser.PLACE_ORDER_SELECTORS
+_SIGNIN_SUBMIT_SELECTORS = CostcoPurchaser.SIGNIN_SUBMIT_SELECTORS
+_ADD_TO_CART_SELECTORS = CostcoPurchaser.ADD_TO_CART_SELECTORS
+_ACCOUNT_NAV = CostcoPurchaser.ACCOUNT_NAV_SELECTORS[0]
+
+
+def _purchaser(config: Config) -> CostcoPurchaser:
+    return CostcoPurchaser(
+        config, profile_dir=config.costco_profile_dir, domain=config.costco_domain
+    )
+
+
+def _amazon(config: Config) -> AmazonPurchaser:
+    return AmazonPurchaser(
+        config, profile_dir=config.amazon_profile_dir, domain=config.amazon_domain
+    )
 
 
 @pytest.mark.parametrize(
@@ -76,7 +90,7 @@ def test_price_from_jsonld(raw: str, expected: float | None) -> None:
     ],
 )
 def test_looks_like_challenge(text: str, url: str, expected: bool) -> None:
-    assert looks_like_challenge(text, url) is expected
+    assert looks_like(text, url, CostcoPurchaser.CHALLENGE_MARKERS) is expected
 
 
 @pytest.mark.parametrize(
@@ -93,7 +107,7 @@ def test_looks_like_challenge(text: str, url: str, expected: bool) -> None:
     ],
 )
 def test_looks_like_signin(text: str, url: str, expected: bool) -> None:
-    assert looks_like_signin(text, url) is expected
+    assert looks_like(text, url, CostcoPurchaser.SIGNIN_MARKERS) is expected
 
 
 class _FakeLocator:
@@ -160,10 +174,6 @@ class _FakePage:
     def wait_for_selector(self, selector: str, timeout: int | None = None) -> None:
         self.waited.append(selector)
         self.present |= self._reveal
-
-
-def _purchaser(config: Config) -> CostcoPurchaser:
-    return CostcoPurchaser(config)
 
 
 def test_click_first_misses_unrendered_button(config: Config) -> None:
@@ -368,3 +378,90 @@ def test_ensure_logged_in_fails_when_submit_never_takes(config: Config) -> None:
     # Logged out and nothing to click — the caller must bail with manual login.
     page = _LoginPage(logged_in=False, present={_ACCOUNT_NAV})
     assert _purchaser(config).ensure_logged_in(page) is False
+
+
+# ─────────── availability (drives the Amazon fallback) ───────────
+
+
+class _AvailLocator:
+    def __init__(self, *, count: int, text: str = "", disabled: bool = False) -> None:
+        self._count = count
+        self._text = text
+        self._disabled = disabled
+
+    @property
+    def first(self) -> "_AvailLocator":
+        return self
+
+    def count(self) -> int:
+        return self._count
+
+    def inner_text(self, timeout: int | None = None) -> str:
+        return self._text
+
+    def is_disabled(self, timeout: int | None = None) -> bool:
+        return self._disabled
+
+
+class _AvailPage:
+    """Models a product page for _check_availability: a body text blob plus an
+    optional add-to-cart locator (present + possibly disabled)."""
+
+    def __init__(self, *, body: str = "", atc: _AvailLocator | None = None) -> None:
+        self._body = body
+        self._atc = atc
+        self.url = "https://www.costco.com/x.product.123.html"
+
+    def locator(self, selector: str) -> _AvailLocator:
+        if selector == "body":
+            return _AvailLocator(count=1, text=self._body)
+        if self._atc is not None and selector in _ADD_TO_CART_SELECTORS:
+            return self._atc
+        return _AvailLocator(count=0)
+
+
+def test_availability_flags_http_404(config: Config) -> None:
+    reason = _purchaser(config)._check_availability(_AvailPage(), 404)
+    assert reason is not None and "404" in reason
+
+
+def test_availability_flags_out_of_stock_marker(config: Config) -> None:
+    page = _AvailPage(body="This item is currently Out of Stock at your warehouse")
+    reason = _purchaser(config)._check_availability(page, 200)
+    assert reason == "is out of stock"
+
+
+def test_availability_flags_not_found_marker(config: Config) -> None:
+    page = _AvailPage(body="Sorry, we can't find the page you requested")
+    reason = _purchaser(config)._check_availability(page, 200)
+    assert reason == "not found"
+
+
+def test_availability_flags_disabled_add_to_cart(config: Config) -> None:
+    page = _AvailPage(atc=_AvailLocator(count=1, disabled=True))
+    reason = _purchaser(config)._check_availability(page, 200)
+    assert reason is not None and "out of stock" in reason
+
+
+def test_availability_passes_in_stock_page(config: Config) -> None:
+    page = _AvailPage(body="In Stock", atc=_AvailLocator(count=1, disabled=False))
+    assert _purchaser(config)._check_availability(page, 200) is None
+
+
+# ─────────── Amazon checkout (the fallback flow) ───────────
+
+
+def test_amazon_start_checkout_clicks_buy_now(config: Config) -> None:
+    page = _FakePage()
+    page.present = {AmazonPurchaser.BUY_NOW_SELECTORS[0]}
+    assert _amazon(config)._start_checkout(page) is True
+    assert page.clicked == [AmazonPurchaser.BUY_NOW_SELECTORS[0]]
+
+
+def test_amazon_resolves_dp_url_from_asin(config: Config) -> None:
+    class _Src:
+        url = ""
+        asin = "B07YYYYYYY"
+
+    url = _amazon(config)._resolve_url(_Src())
+    assert url == "https://www.amazon.com/dp/B07YYYYYYY"
