@@ -185,6 +185,14 @@ class CostcoPurchaser:
             "--disable-backgrounding-occluded-windows",
             "--disable-background-timer-throttling",
             "--disable-renderer-backgrounding",
+            # Hide the Playwright automation fingerprint. Costco fronts both the
+            # storefront and signin.costco.com with Akamai bot detection, which
+            # reads navigator.webdriver / the --enable-automation switch and
+            # silently kills the sign-in window mid-flow (it "buffers then
+            # closes", leaving the profile logged out). Dropping the switch
+            # (ignore_default_args, below) plus this flag makes the headed
+            # window present as an ordinary Chrome so the hand login completes.
+            "--disable-blink-features=AutomationControlled",
         ]
         if self.config.wayland:
             # XWayland usually handles headed Chromium, but force native
@@ -215,6 +223,7 @@ class CostcoPurchaser:
                 user_data_dir=str(self.config.profile_dir),
                 headless=False,
                 args=self._launch_args(),
+                ignore_default_args=["--enable-automation"],
             )
             context.set_default_timeout(_STEP_TIMEOUT_MS)
             page = context.pages[0] if context.pages else context.new_page()
@@ -371,6 +380,7 @@ class CostcoPurchaser:
                 user_data_dir=str(self.config.profile_dir),
                 headless=False,
                 args=self._launch_args(),
+                ignore_default_args=["--enable-automation"],
             )
             page = context.pages[0] if context.pages else context.new_page()
             try:
