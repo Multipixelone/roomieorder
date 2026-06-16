@@ -6,14 +6,18 @@ timeout per step, a screenshot on every failure, and explicit challenge
 detection that halts rather than looping into a CAPTCHA.
 
 The operator logs into Costco by hand once into ``profile_dir`` (see
-:meth:`CostcoPurchaser.login`, exposed as ``roomieorder login``); with no 2FA
-the session persists. Nothing here stores a Costco credential — the login
-lives entirely in the browser profile.
+:meth:`CostcoPurchaser.login`, exposed as ``roomieorder login``); the profile
+then remembers the email+password. Costco doesn't treat a remembered profile as
+authenticated until Sign In is clicked, so each buy re-establishes the session
+with :meth:`CostcoPurchaser.ensure_logged_in` (one click of the prefilled form).
+Nothing here stores a Costco credential — the login lives entirely in the
+browser profile.
 
 Run order inside :meth:`CostcoPurchaser.buy`:
 
 1. goto the product page (item.url, with slug; falls back to product_url())
-2. detect challenge / sign-in wall (Costco fronts the site with Akamai)
+2. detect challenge (Costco fronts the site with Akamai); if logged out,
+   sign in with the profile's cached credentials and reload (ensure_logged_in)
 3. read live price → ``proceed_check(price)`` (price ceiling + spend cap)
 4. add to cart → go to cart → checkout (Costco has no one-click Buy Now)
 5. on the review page: detect challenge
@@ -63,15 +67,30 @@ _CHALLENGE_MARKERS = (
     "verify your identity",
 )
 
-# A logged-out profile gets bounced to the sign-in wall the moment it tries to
-# check out. That's not a challenge — it needs `roomieorder login`, not a
-# manual captcha — so detect it separately and stop with a clear message.
+# A logged-out session gets bounced to Costco's dedicated logon page when it
+# tries to check out. That's not a challenge — it's an auth bounce. Detect it by
+# the *logon URL/host*: the "Sign In / Register" link text lives in the header
+# of every logged-out page, so body text matching it false-positives on a
+# perfectly normal product page. Live auth state is decided by `is_logged_in`
+# (account nav), not this — this only catches a mid-flow bounce to the wall.
+# "sign in or register" (the logon page's own heading, with "or", not the
+# header link's "/") is kept as a body backstop for when the URL isn't telling.
 # TODO(costco): verify against live DOM — sign-in host/path and CTA wording.
 _SIGNIN_MARKERS = (
     "/logon",
     "signin.costco.com",
-    "sign in / register",
     "sign in or register",
+)
+# The remembered-credential logon form's submit control. The email+password are
+# cached in the profile, so submitting re-establishes the session without
+# roomieorder ever holding a credential (PLAN §1). Role/text is tried first by
+# `ensure_logged_in`; these ids/attrs are the backstop.
+# TODO(costco): verify against live DOM — logon submit control.
+_SIGNIN_SUBMIT_SELECTORS = (
+    "[automation-id='signInButton']",
+    "input#sign-in-btn",
+    "button#sign-in-btn",
+    "button[type='submit']",
 )
 
 # Ordered, redundant locators. Each is tried in turn; the first that resolves
@@ -237,8 +256,15 @@ class CostcoPurchaser:
             try:
                 page.goto(url, wait_until="domcontentloaded")
 
-                if self._is_signin(page):
+                if self._is_challenge(page):
+                    return self._challenge(page, item_key, "product")
+                # A logged-out profile renders the product page fine (the header
+                # just shows "Sign In / Register"), so don't read it as a wall —
+                # sign in with the cached credentials, then reload so the price
+                # and checkout run against the authenticated session.
+                if not self.ensure_logged_in(page):
                     return self._signin_required(page, item_key, "product")
+                page.goto(url, wait_until="domcontentloaded")
                 if self._is_challenge(page):
                     return self._challenge(page, item_key, "product")
 
@@ -412,6 +438,39 @@ class CostcoPurchaser:
             text = text.lower()
             return "sign in" not in text and "register" not in text
         return False
+
+    def ensure_logged_in(self, page: object) -> bool:
+        """Drive Costco's cached-credential sign-in if the profile is logged out.
+
+        Costco remembers the email *and* password in the persistent profile, but
+        does not treat a remembered profile as authenticated until the Sign In
+        button is clicked — a session that "has the cookies" still starts logged
+        out (see the costco-login-click-required note). So when `is_logged_in`
+        reads logged-out, open the logon page via the header "Sign In / Register"
+        link, let the form prefill, and click its Sign In submit. Stores no
+        credential — the click only submits what the browser already filled.
+
+        Returns True if logged in (already, or after the click), False if the
+        click sequence didn't take (caller bails with the manual-login message).
+        TODO(costco): verify against live DOM — sign-in link + logon submit."""
+        if self.is_logged_in(page):
+            return True
+        # Reach the logon form: the header link first, the logon URL as backstop.
+        if not self._click_by_role(page, ("link", "button"), "sign in"):
+            try:
+                page.goto(  # type: ignore[attr-defined]
+                    f"https://www.{self.config.costco_domain}/logon",
+                    wait_until="domcontentloaded",
+                )
+            except Exception:  # noqa: BLE001 — no way to reach the form; give up
+                return False
+        self._settle(page)
+        # Submit the prefilled form. Prefer the form's own submit control over a
+        # role/text match so we don't re-click the header "Sign In" link.
+        if not self._click_first(page, _SIGNIN_SUBMIT_SELECTORS):
+            self._click_by_role(page, ("button",), "sign in")
+        self._settle(page)
+        return self.is_logged_in(page)
 
     def _read_price(self, page: object) -> Optional[float]:
         for sel in _PRICE_SELECTORS:
