@@ -14,6 +14,9 @@ let
   baseEnv = {
     PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
     PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
+    # patchright (and playwright) ship a prebuilt Node driver that can't run on
+    # NixOS; point both at a Nix node so the patched driver actually launches.
+    PLAYWRIGHT_NODEJS_PATH = lib.getExe pkgs.nodejs;
     # Drive *real* Google Chrome, not Playwright's bundled Chromium: Akamai
     # reads Chromium's missing proprietary codecs and "Chromium" Sec-CH-UA brand
     # as a bot. Pins the exact binary so Playwright/patchright launch it via

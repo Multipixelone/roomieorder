@@ -14,6 +14,17 @@ dependencies = [
   "playwright>=1.40",
 ]
 
+[project.optional-dependencies]
+# patchright is an API-identical, undetected drop-in for playwright that closes
+# the CDP Runtime.enable leak Akamai keys on (see purchase._playwright_api).
+# Installed, it's auto-preferred at runtime; absent, the buy flow falls back to
+# stock playwright. Kept optional because its patched driver is fetched from
+# PyPI, which the offline Nix build can't reach — the Nix package wires it in
+# separately (see nix/package.nix).
+stealth = [
+  "patchright>=1.40",
+]
+
 [project.scripts]
 roomieorder = "roomieorder.cli:main"
 
