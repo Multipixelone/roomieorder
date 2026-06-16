@@ -234,9 +234,13 @@ class _PricePage:
 
     def __init__(self, matches: dict[str, _PriceLocator]) -> None:
         self._matches = matches
+        self.url = "https://www.costco.com/p/-/x/4000206004"
 
     def locator(self, selector: str) -> _PriceLocator:
         return self._matches.get(selector, _PriceLocator([]))
+
+    def title(self, timeout: int | None = None) -> str:
+        return "Kirkland Signature Bath Tissue"
 
 
 def test_read_price_prefers_visible_selector(config: Config) -> None:
@@ -264,6 +268,23 @@ def test_read_price_falls_back_to_jsonld(config: Config) -> None:
 
 def test_read_price_returns_none_when_no_source(config: Config) -> None:
     assert _purchaser(config)._read_price(_PricePage({})) is None
+
+
+def test_probe_selectors_reports_matches_and_misses(config: Config) -> None:
+    page = _PricePage(
+        {
+            _PRICE_SELECTORS[0]: _PriceLocator(["$24.99"]),
+            _JSONLD_SELECTOR: _PriceLocator(['{"offers":{"price":"24.99"}}']),
+        }
+    )
+    report = _purchaser(config)._probe_selectors(page)
+    # The matching selector shows its count + sample; a miss shows count=0.
+    assert f"{_PRICE_SELECTORS[0]}  count=1  sample='$24.99'" in report
+    assert f"{_PRICE_SELECTORS[1]}  count=0" in report
+    # Resolved price and the JSON-LD offer price both surface in the probe.
+    assert "read_price:  24.99" in report
+    assert "offer_price=24.99" in report
+    assert "title: Kirkland Signature Bath Tissue" in report
 
 
 class _LoginLocator:

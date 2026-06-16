@@ -10,6 +10,7 @@ Subcommands:
 * ``test-sheet``  — append a test row to the configured Google Sheet.
 * ``login``        — open the profile headed to sign into Costco by hand.
 * ``dry-run KEY`` — drive one item to its review page and screenshot, no order.
+* ``dump-dom KEY`` — read-only DOM dump + selector probe for bring-up.
 * ``resume`` / ``pause`` / ``status`` — manage the worker-pause flag.
 """
 
@@ -211,6 +212,36 @@ def dry_run(item_key: str) -> None:
     if result.screenshot:
         click.echo(f"screenshot: {result.screenshot}")
     store.close()
+
+
+@main.command(name="dump-dom")
+@click.argument("item_key")
+def dump_dom(item_key: str) -> None:
+    """Open ITEM_KEY's product page read-only and dump the rendered DOM.
+
+    A bring-up aid for confirming the live-DOM selectors: navigates to the
+    product page (reusing the logged-in profile) and writes the rendered HTML,
+    a probe of every candidate selector, and a screenshot to the shots dir, then
+    prints the probe. Never adds to cart or places an order.
+    """
+    from roomieorder.purchase import CostcoPurchaser
+
+    config = load_config()
+    items = load_catalog(config.catalog_path)
+    item = items.get(item_key)
+    if item is None:
+        raise click.ClickException(f"unknown item_key: {item_key} (have: {', '.join(items)})")
+
+    purchaser = CostcoPurchaser(config)
+    click.echo(f"dump-dom {item_key} → {item.url or config.product_url(item.item_number)}")
+    result = purchaser.dump_dom(item_key, item)
+    click.echo(f"logged_in:  {result.logged_in}")
+    click.echo(f"challenge:  {result.challenge}")
+    click.echo(f"html:       {result.html}")
+    click.echo(f"probe:      {result.probe}")
+    click.echo(f"screenshot: {result.screenshot}")
+    click.echo("")
+    click.echo(result.summary)
 
 
 @main.command()
