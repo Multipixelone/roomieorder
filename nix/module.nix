@@ -14,6 +14,11 @@ let
   baseEnv = {
     PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
     PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
+    # Drive *real* Google Chrome, not Playwright's bundled Chromium: Akamai
+    # reads Chromium's missing proprietary codecs and "Chromium" Sec-CH-UA brand
+    # as a bot. Pins the exact binary so Playwright/patchright launch it via
+    # executable_path (see purchase._launch_context).
+    ROOMIEORDER_CHROME_PATH = lib.getExe cfg.chromePackage;
     # Relative to WorkingDirectory (= stateDir below).
     ROOMIEORDER_DB = "state.sqlite";
     ROOMIEORDER_PROFILE_DIR = "profile";
@@ -98,6 +103,22 @@ in
       type = lib.types.bool;
       default = false;
       description = "Pass --ozone-platform=wayland to Chromium.";
+    };
+
+    chromePackage = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.google-chrome;
+      defaultText = lib.literalExpression "pkgs.google-chrome";
+      description = ''
+        The browser the buy flow drives, exposed to it via ROOMIEORDER_CHROME_PATH.
+
+        Defaults to real Google Chrome (unfree — needs nixpkgs.config.allowUnfree
+        or an allowUnfreePredicate for "google-chrome"): Akamai fingerprints the
+        actual browser build, and Playwright's bundled Chromium fails that check
+        (no proprietary H.264/AAC codecs, "Chromium" rather than "Google Chrome"
+        in the Sec-CH-UA brand). Override with any Chrome/Chromium-family package
+        whose mainProgram is the browser binary if you can't or won't ship Chrome.
+      '';
     };
 
     openclaw = {

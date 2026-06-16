@@ -17,6 +17,14 @@ python3Packages.buildPythonApplication rec {
     httpx
     gspread
     google-auth
+    # Vanilla Playwright. The stealth win that's wired up here is driving real
+    # Google Chrome via executable_path (ROOMIEORDER_CHROME_PATH, set by the
+    # module) — that alone fixes the codec/Sec-CH-UA brand tells. `patchright`
+    # (the `stealth` extra in pyproject) additionally closes the CDP
+    # Runtime.enable leak and is auto-preferred at runtime when importable
+    # (purchase._playwright_api), but it isn't in nixpkgs — packaging its
+    # PyPI-fetched patched driver is a follow-up. Until then the code falls back
+    # to this build cleanly.
     playwright
   ];
 

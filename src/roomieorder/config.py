@@ -81,6 +81,17 @@ class Config(BaseModel):
     costco_domain: str = "costco.com"
     wayland: bool = False
 
+    # Browser / anti-bot. Akamai fingerprints the *real* browser build, so the
+    # buy flow must drive Google Chrome, not Playwright's bundled Chromium —
+    # Chromium ships no proprietary H.264/AAC codecs and brands its Sec-CH-UA as
+    # "Chromium", both of which Akamai reads as "not a real user". `chrome_path`
+    # pins an exact binary (the NixOS deployment points it at the nixpkgs
+    # google-chrome); when unset, `chrome_channel` asks Playwright to find a
+    # system Chrome by channel. Empty channel + empty path falls back to the
+    # bundled Chromium (the only build available on a bare dev checkout).
+    chrome_path: str = ""
+    chrome_channel: str = "chrome"
+
     # Google Sheets — logging is disabled when sheet_id is empty.
     google_service_account_json: str = ""
     sheet_id: str = ""
@@ -131,6 +142,8 @@ def load_config() -> Config:
         shots_dir=Path(_env_str("ROOMIEORDER_SHOTS_DIR", "data/shots")),
         costco_domain=_env_str("ROOMIEORDER_COSTCO_DOMAIN", "costco.com"),
         wayland=_env_bool("ROOMIEORDER_WAYLAND", False),
+        chrome_path=_env_str("ROOMIEORDER_CHROME_PATH", ""),
+        chrome_channel=_env_str("ROOMIEORDER_CHROME_CHANNEL", "chrome"),
         google_service_account_json=_env_str("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
         sheet_id=_env_str("ROOMIEORDER_SHEET_ID", ""),
         sheet_tab=_env_str("ROOMIEORDER_SHEET_TAB", "Orders"),

@@ -39,7 +39,10 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:
+    from playwright.sync_api import BrowserContext
 
 from roomieorder.catalog import CatalogItem
 from roomieorder.config import Config
@@ -47,6 +50,26 @@ from roomieorder.guards import GuardResult
 from roomieorder.store import Status
 
 _logger = logging.getLogger(__name__)
+
+
+def _playwright_api() -> object:
+    """Return the Playwright sync API module, preferring patchright.
+
+    Akamai's strongest Playwright tell isn't ``navigator.webdriver`` (the
+    ``--disable-blink-features=AutomationControlled`` flag clears that) — it's
+    the Chrome DevTools Protocol leak: stock Playwright keeps ``Runtime.enable``
+    on, so a page can plant a getter on an Error's ``stack`` and watch it fire
+    when CDP serialises the object, unmasking the automation. ``patchright`` is
+    an API-identical drop-in that runs scripts in isolated execution contexts
+    and disables the Console API to close that leak (plus the command-flag and
+    binding-global tells). Prefer it when installed; fall back to stock
+    Playwright so a bare checkout without the ``stealth`` extra still runs.
+    """
+    try:
+        import patchright.sync_api as api  # type: ignore[import-not-found]
+    except ImportError:
+        import playwright.sync_api as api
+    return api
 
 # Per-step navigation/click timeout. A step that stalls past this is a redesign
 # or a challenge, not slowness.
@@ -153,6 +176,34 @@ class PurchaseResult:
     order_id: Optional[str] = None
     message: str = ""
     screenshot: Optional[Path] = None
+
+
+@dataclass
+class DumpResult:
+    """Artifacts from a read-only :meth:`CostcoPurchaser.dump_dom` bring-up run.
+
+    ``summary`` is the same probe text written to ``probe``, surfaced so the CLI
+    can print it without re-reading the file."""
+
+    logged_in: bool = False
+    challenge: bool = False
+    html: Optional[Path] = None
+    probe: Optional[Path] = None
+    screenshot: Optional[Path] = None
+    summary: str = ""
+
+
+# Candidate selector groups, probed by :meth:`CostcoPurchaser.dump_dom` so a
+# bring-up run reports which of every `# TODO(costco): verify against live DOM`
+# guess actually resolves on the live page.
+_PROBE_GROUPS = (
+    ("price", _PRICE_SELECTORS),
+    ("price-meta", _PRICE_META_SELECTORS),
+    ("add-to-cart", _ADD_TO_CART_SELECTORS),
+    ("place-order", _PLACE_ORDER_SELECTORS),
+    ("order-total", _ORDER_TOTAL_SELECTORS),
+    ("signin-submit", _SIGNIN_SUBMIT_SELECTORS),
+)
 
 
 # proceed_check(live_price) -> GuardResult. Lets the worker run price-ceiling
@@ -283,6 +334,38 @@ class CostcoPurchaser:
             args.append("--ozone-platform=wayland")
         return args
 
+    def _launch_context(self, pw: object) -> "BrowserContext":
+        """Launch the persistent context with the anti-bot configuration.
+
+        Single source of truth for both ``buy`` and ``login`` so they present
+        an identical browser to Akamai. The stealth-relevant choices:
+
+        * **Real Google Chrome, not bundled Chromium** — ``executable_path``
+          (a pinned binary, e.g. the NixOS google-chrome) wins; else
+          ``channel`` ("chrome") finds a system install; else we fall back to
+          Playwright's Chromium. Chrome carries the proprietary codecs and the
+          ``"Google Chrome"`` Sec-CH-UA brand a real visitor has and Chromium
+          lacks — Akamai keys on exactly that gap.
+        * **``no_viewport=True``** — without it Playwright pins an emulated
+          1280×720 viewport that doesn't match the real OS window, a mismatch
+          bot detectors flag; this lets the content size track the window.
+        * **No custom ``user_agent`` / headers** — deliberately omitted. An
+          injected UA that disagrees with the real build's Client Hints is a
+          worse tell than the honest default, so we never set one.
+        """
+        kwargs: dict[str, object] = {
+            "user_data_dir": str(self.config.profile_dir),
+            "headless": False,
+            "args": self._launch_args(),
+            "ignore_default_args": ["--enable-automation"],
+            "no_viewport": True,
+        }
+        if self.config.chrome_path:
+            kwargs["executable_path"] = self.config.chrome_path
+        elif self.config.chrome_channel:
+            kwargs["channel"] = self.config.chrome_channel
+        return pw.chromium.launch_persistent_context(**kwargs)  # type: ignore[attr-defined,no-any-return]
+
     def _shot_path(self, item_key: str, tag: str) -> Path:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         return self.config.shots_dir / f"{stamp}_{item_key}_{tag}.png"
@@ -296,18 +379,13 @@ class CostcoPurchaser:
         """Execute (or dry-run) the buy. Always returns a PurchaseResult;
         the only exceptions that escape are programmer errors, not Costco
         flakiness — those become a ``failed`` result with a screenshot."""
-        from playwright.sync_api import TimeoutError as PWTimeout
-        from playwright.sync_api import sync_playwright
+        api = _playwright_api()
+        PWTimeout = api.TimeoutError  # type: ignore[attr-defined]
 
         url = item.url or self.config.product_url(item.item_number)
 
-        with sync_playwright() as pw:
-            context = pw.chromium.launch_persistent_context(
-                user_data_dir=str(self.config.profile_dir),
-                headless=False,
-                args=self._launch_args(),
-                ignore_default_args=["--enable-automation"],
-            )
+        with api.sync_playwright() as pw:  # type: ignore[attr-defined]
+            context = self._launch_context(pw)
             context.set_default_timeout(_STEP_TIMEOUT_MS)
             page = context.pages[0] if context.pages else context.new_page()
             # Mark this tab active so Chromium un-throttles its renderer even
@@ -453,6 +531,121 @@ class CostcoPurchaser:
             finally:
                 context.close()
 
+    def dump_dom(self, item_key: str, item: CatalogItem) -> DumpResult:
+        """Open ITEM_KEY's product page read-only and dump the rendered DOM.
+
+        A bring-up aid for confirming the ``# TODO(costco): verify against live
+        DOM`` selectors against the real page instead of guessing. It stops at
+        the product page — it never adds to cart or places an order — reusing
+        buy()'s logged-in profile and stealth launch. Writes the rendered HTML,
+        a probe of every candidate selector group (see :data:`_PROBE_GROUPS`),
+        and a screenshot to ``shots_dir``. Best-effort throughout: a challenge or
+        a logged-out profile still dumps whatever painted, flagged in the result.
+        """
+        api = _playwright_api()
+        url = item.url or self.config.product_url(item.item_number)
+        result = DumpResult()
+
+        with api.sync_playwright() as pw:  # type: ignore[attr-defined]
+            context = self._launch_context(pw)
+            context.set_default_timeout(_STEP_TIMEOUT_MS)
+            page = context.pages[0] if context.pages else context.new_page()
+            try:
+                page.bring_to_front()
+            except Exception:  # noqa: BLE001 — purely an optimisation
+                pass
+            try:
+                page.goto(url, wait_until="domcontentloaded")
+                result.challenge = self._is_challenge(page)
+                # Sign in if we can so the probe also sees any logged-in-only
+                # controls, but never bail on it — dumping a logged-out page is
+                # still useful for the price selectors (price renders logged out).
+                if not result.challenge and not self.is_logged_in(page):
+                    self.ensure_logged_in(page)
+                    page.goto(url, wait_until="domcontentloaded")
+                    result.challenge = self._is_challenge(page)
+                self._settle(page)
+                result.logged_in = self.is_logged_in(page)
+                result.summary = self._probe_selectors(page)
+                result.html = self._write_text(item_key, "dom", "html", self._page_html(page))
+                result.probe = self._write_text(item_key, "probe", "txt", result.summary)
+                result.screenshot = self._screenshot(page, item_key, "dump")
+            finally:
+                context.close()
+        return result
+
+    def _page_html(self, page: object) -> str:
+        try:
+            return page.content()  # type: ignore[attr-defined,no-any-return]
+        except Exception:  # noqa: BLE001 — dump whatever we can
+            return ""
+
+    def _write_text(self, item_key: str, tag: str, ext: str, content: str) -> Optional[Path]:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        path = self.config.shots_dir / f"{stamp}_{item_key}_{tag}.{ext}"
+        try:
+            path.write_text(content, encoding="utf-8")
+            return path
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("write %s failed: %s", tag, exc)
+            return None
+
+    def _probe_selectors(self, page: object) -> str:
+        """Human-readable report of which candidate selectors resolve on ``page``.
+
+        For each selector: its match count and a short text/``content`` sample,
+        so a glance tells you which guess is live and what the right one is. Pure
+        read-only — it only ever reads counts and text."""
+        lines: list[str] = []
+        try:
+            lines.append(f"url:   {page.url}")  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            lines.append(f"title: {page.title(timeout=2_000)}")  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+        lines.append(f"logged_in:   {self.is_logged_in(page)}")
+        lines.append(f"read_price:  {self._read_price(page)}")
+        lines.append("")
+        for label, selectors in _PROBE_GROUPS:
+            lines.append(f"[{label}]")
+            lines.extend(self._probe_one(page, sel) for sel in selectors)
+            lines.append("")
+        lines.append("[json-ld]")
+        try:
+            blocks = page.locator(_JSONLD_SELECTOR)  # type: ignore[attr-defined]
+            count = blocks.count()
+        except Exception:  # noqa: BLE001
+            count = 0
+        lines.append(f"  {_JSONLD_SELECTOR}  count={count}")
+        for i in range(count):
+            try:
+                raw = blocks.nth(i).inner_text(timeout=2_000)
+            except Exception:  # noqa: BLE001
+                continue
+            lines.append(f"    [{i}] offer_price={_price_from_jsonld(raw)}  ({len(raw)} chars)")
+        return "\n".join(lines)
+
+    def _probe_one(self, page: object, selector: str) -> str:
+        try:
+            loc = page.locator(selector)  # type: ignore[attr-defined]
+            count = loc.count()
+        except Exception as exc:  # noqa: BLE001
+            return f"  {selector}  ERROR {exc}"
+        if count == 0:
+            return f"  {selector}  count=0"
+        try:
+            first = loc.first
+            if selector.startswith("meta"):
+                sample = first.get_attribute("content", timeout=2_000) or ""
+            else:
+                sample = first.inner_text(timeout=2_000)
+        except Exception:  # noqa: BLE001
+            sample = "<unreadable>"
+        sample = " ".join(sample.split())[:80]
+        return f"  {selector}  count={count}  sample={sample!r}"
+
     def login(self, wait_for_operator: Callable[[object], None]) -> None:
         """Open the persistent profile headed so the operator can sign into
         Costco by hand. Cookies persist in ``profile_dir``; roomieorder never
@@ -462,16 +655,11 @@ class CostcoPurchaser:
         loaded and must *block* until the human is done — the context (and the
         saved session with it) is torn down as soon as it returns.
         """
-        from playwright.sync_api import sync_playwright
+        api = _playwright_api()
 
         self.config.profile_dir.mkdir(parents=True, exist_ok=True)
-        with sync_playwright() as pw:
-            context = pw.chromium.launch_persistent_context(
-                user_data_dir=str(self.config.profile_dir),
-                headless=False,
-                args=self._launch_args(),
-                ignore_default_args=["--enable-automation"],
-            )
+        with api.sync_playwright() as pw:  # type: ignore[attr-defined]
+            context = self._launch_context(pw)
             page = context.pages[0] if context.pages else context.new_page()
             try:
                 page.goto(
