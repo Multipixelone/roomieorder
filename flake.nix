@@ -52,6 +52,12 @@
             mypy = {
               enable = true;
               settings.binPath = "${pythonEnv}/bin/mypy";
+              # mypy must analyse all modules in one pass. With the default
+              # require_serial = false, pre-commit partitions the file list
+              # across parallel mypy processes; a partial file set both
+              # mis-resolves imports and (mypy 1.20.1) crashes with an
+              # INTERNAL ERROR. Serial = one invocation over every file.
+              require_serial = true;
             };
             pytest = {
               enable = true;
