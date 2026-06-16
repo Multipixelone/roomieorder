@@ -23,6 +23,10 @@ _ACCOUNT_NAV = "[automation-id='accountMenuButton']"
     "text,expected",
     [
         ("$24.99", 24.99),
+        # Costco's React PDP splits the price into whole/dot/decimal spans, so
+        # inner_text comes back with whitespace inside the number.
+        ("$ 27 . 39", 27.39),
+        ("$ 27 . 39 $5.60 OFF was $ 32.99", 27.39),
         ("Price: $1,234.56", 1234.56),
         ("£9.50 each", 9.50),
         ("€11,99", 11.99),

@@ -122,8 +122,17 @@ _SIGNIN_SUBMIT_SELECTORS = (
 
 # Ordered, redundant locators. Each is tried in turn; the first that resolves
 # wins. Role/text first (survives CSS churn), id/name as backstops.
-# TODO(costco): verify against live DOM — Costco product-price selectors.
+# Verified against live DOM 2026-06-16 (paper_towels dump-dom): Costco's PDP is
+# now a MUI/React app keyed on `data-testid`, not `automation-id`/CSS classes —
+# the price lives in `[data-testid='single-price-content']` (the *sale* price,
+# e.g. $27.39), with the old `automation-id`/class guesses all dead (count=0).
+# `single-price-content` is read first because the broader `[data-testid='price']`
+# container also holds the promo "$X OFF" strikethrough + original list price, so
+# its text would let parse_price grab the wrong number. The legacy guesses are
+# kept as backstops for any storefront variant that still renders them.
 _PRICE_SELECTORS = (
+    "[data-testid='single-price-content']",
+    "[data-testid='price']",
     "[automation-id='productPriceOutput']",
     ".product-price-amount",
     ".product-price .value",
@@ -144,8 +153,13 @@ _PRICE_META_SELECTORS = (
 )
 _JSONLD_SELECTOR = "script[type='application/ld+json']"
 # Costco has no one-click Buy Now — only Add to Cart (see _start_checkout).
-# TODO(costco): verify against live DOM — add-to-cart control.
+# Verified against live DOM 2026-06-16 (paper_towels dump-dom): the PDP add-to-cart
+# button is `[data-testid='Button_addToCartDrawer_pdp']` (id of the same name). Its
+# *accessible name* is the product title ("Add Bounty Advanced Paper Towels, …"),
+# NOT "Add to Cart" — so _start_checkout's role/text "add to cart" match misses and
+# this CSS fallback is what actually clicks it. Legacy guesses kept as backstops.
 _ADD_TO_CART_SELECTORS = (
+    "[data-testid='Button_addToCartDrawer_pdp']",
     "[automation-id='addToCartButton']",
     "input[value='Add to Cart']",
     "button#add-to-cart-btn",
@@ -222,8 +236,14 @@ def parse_price(text: str) -> Optional[float]:
     (``€11,99``) by treating the *last* ``.``/``,`` as the decimal point and
     dropping every other separator as grouping. Costco shows cents, so the
     trailing group is the fraction.
+
+    Costco's React PDP splits the price across separate ``<span>``s — whole,
+    dot, decimal — so the element's ``inner_text`` comes back as ``"$ 27 . 39"``
+    with whitespace *inside* the number. Collapse whitespace sitting between two
+    number characters first, so the value parses as ``27.39`` rather than ``27``.
     """
-    m = _PRICE_RE.search(text or "")
+    text = re.sub(r"(?<=[\d.,])\s+(?=[\d.,])", "", text or "")
+    m = _PRICE_RE.search(text)
     if not m:
         return None
     num = m.group(0)

@@ -266,3 +266,52 @@ out during deploy (see [`PLAN-ROOMIE.md`](./PLAN-ROOMIE.md) §4).
 - [ ] Populate `catalog.json` with real Costco item numbers + slug URLs + price ceilings.
 - [ ] Launch Talon's Chromium profile once, log into Costco, confirm default shipping address + saved payment are set.
 - [ ] Verify checkout reaches the review page in `DRY_RUN` for each item before going live.
+
+---
+
+## 9. Verifying the purchase workflow (selector bring-up — next steps)
+
+> **Context (2026-06-16).** A read-only `roomieorder dump-dom paper_towels` against
+> live Costco showed the PDP has been rebuilt as a **MUI/React app keyed on
+> `data-testid`** — every `automation-id`/CSS-class guess in `purchase.py` is dead
+> (`count=0`). The **product-page** selectors are now fixed *and live-verified*:
+> price reads `[data-testid='single-price-content']` → `$27.39` (the real promo
+> price; the JSON-LD fallback was returning the $32.99 list price), and add-to-cart
+> is `[data-testid='Button_addToCartDrawer_pdp']` (its accessible name is the
+> product *title*, so the role/text "add to cart" match misses — the CSS fallback
+> is what clicks it). `parse_price` now tolerates the whitespace Costco's split
+> price spans inject (`"$ 27 . 39"`).
+>
+> **Still unverified:** every selector past the product page. They almost
+> certainly moved to `data-testid` too. Verify them in this order:
+
+1. **Deploy the fix first.** The selector/`parse_price` changes and the `dump-dom`
+   command itself are *not* in the deployed build (`/run/current-system` predates
+   them). Rebuild + redeploy via the `infra` flake before any further bring-up, so
+   the live worker and the CLI agree.
+
+2. **Confirm the logged-in product page.** Run `roomieorder login` once (hand-login;
+   the §2 "click Sign In" caveat in `AGENTS.md` applies — prefilled ≠ logged in),
+   then `roomieorder dump-dom paper_towels` and confirm the probe reports
+   `logged_in: True` and `read_price: 27.39`. A logged-out dump only proves the
+   price/add-to-cart selectors; cart/checkout need the session.
+
+3. **Verify the checkout-side selectors against live DOM.** These are still old
+   guesses — chase them with screenshots from a `DRY_RUN=true` `roomieorder dry-run
+   paper_towels` (it stops at the review page, never orders) plus, where a dump
+   helps, extending `dump-dom`'s probe groups. Confirm each and update `purchase.py`:
+   - `_SIGNIN_SUBMIT_SELECTORS` — the cached-credential logon submit (`ensure_logged_in`).
+   - the cart URL (`/CheckoutCartView`) and the add-to-cart → cart → checkout → review step order in `_start_checkout` (esp. the "checkout"/"continue" role-text CTAs).
+   - `_PLACE_ORDER_SELECTORS` + the `_place_order` accessible-name regex (`place (your )?order`).
+   - `_ORDER_TOTAL_SELECTORS` and `_ORDER_ID_RE` on the confirmation page.
+   - `is_logged_in`'s account-nav selectors and `_CHALLENGE_MARKERS`/`_SIGNIN_MARKERS`.
+
+4. **One real buy (Phase 5).** Only after a `DRY_RUN` reaches the review page for a
+   cheap item: flip `DRY_RUN=false` for that one item, watch it place, and confirm
+   the order # + total scrape and the Sheets row. Then re-enable the worker.
+
+**Operational note — profile lock.** The persistent profile holds a Chrome
+`SingletonLock`. A crashed/killed Chrome leaves a *stale* lock pointing at a dead
+PID, which makes the next launch fail with a "profile in use" / sign-in error. If a
+buy dies that way, clear `profile/Singleton{Lock,Socket,Cookie}` (only when no
+Chrome is running on that profile) before retrying.
