@@ -65,11 +65,14 @@ def _playwright_api() -> object:
     binding-global tells). Prefer it when installed; fall back to stock
     Playwright so a bare checkout without the ``stealth`` extra still runs.
     """
-    try:
-        import patchright.sync_api as api  # type: ignore[import-not-found]
-    except ImportError:
-        import playwright.sync_api as api
-    return api
+    import importlib
+
+    for name in ("patchright.sync_api", "playwright.sync_api"):
+        try:
+            return importlib.import_module(name)
+        except ImportError:
+            continue
+    raise ImportError("neither patchright nor playwright is installed")
 
 # Per-step navigation/click timeout. A step that stalls past this is a redesign
 # or a challenge, not slowness.
