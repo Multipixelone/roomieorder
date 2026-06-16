@@ -27,7 +27,7 @@ from roomieorder.catalog import Catalog, load_catalog
 from roomieorder.config import Config, load_config
 from roomieorder.guards import check_intake, check_price_ceiling, check_spend_cap
 from roomieorder.notify import Notifier, build_notifier
-from roomieorder.purchase import AmazonPurchaser, PurchaseResult
+from roomieorder.purchase import CostcoPurchaser, PurchaseResult
 from roomieorder.sheets import SheetsClient, build_sheets
 from roomieorder.store import QueueRow, Store
 
@@ -79,7 +79,7 @@ class Engine:
         self.store.init_db()
         self.notifier: Notifier = build_notifier(config)
         self.sheets: SheetsClient = build_sheets(config)
-        self.purchaser = AmazonPurchaser(config)
+        self.purchaser = CostcoPurchaser(config)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -183,7 +183,7 @@ class Engine:
                 "timestamp": row.updated_at.isoformat(),
                 "item_key": row.item_key,
                 "title": item.title,
-                "asin": item.asin,
+                "item_number": item.item_number,
                 "qty": item.qty,
                 "unit_price": result.unit_price,
                 "order_total": result.order_total,

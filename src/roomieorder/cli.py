@@ -8,7 +8,7 @@ Subcommands:
 * ``queue``       — show recent queue rows.
 * ``test-notify`` — emit a test message via the configured notifier.
 * ``test-sheet``  — append a test row to the configured Google Sheet.
-* ``login``        — open the profile headed to sign into Amazon by hand.
+* ``login``        — open the profile headed to sign into Costco by hand.
 * ``dry-run KEY`` — drive one item to its review page and screenshot, no order.
 * ``resume`` / ``pause`` / ``status`` — manage the worker-pause flag.
 """
@@ -38,7 +38,7 @@ def _setup_logging(verbose: bool) -> None:
 @click.group()
 @click.option("-v", "--verbose", is_flag=True, help="Debug logging.")
 def main(verbose: bool) -> None:
-    """roomieorder — HA button → Amazon order → Google Sheets."""
+    """roomieorder — HA button → Costco order → Google Sheets."""
     _setup_logging(verbose)
 
 
@@ -79,7 +79,7 @@ def catalog(as_json: bool) -> None:
     for key, item in items.items():
         click.echo(
             f"{key:16} {item.title}\n"
-            f"{'':16} asin={item.asin} qty={item.qty} "
+            f"{'':16} item#={item.item_number} qty={item.qty} "
             f"expected=${item.expected_price:.2f} ceiling=${item.price_ceiling:.2f} "
             f"cooldown={item.cooldown_days}d"
         )
@@ -153,20 +153,20 @@ def test_sheet() -> None:
 
 @main.command()
 def login() -> None:
-    """Open the Amazon profile in a real browser so you can sign in by hand.
+    """Open the Costco profile in a real browser so you can sign in by hand.
 
-    roomieorder never stores an Amazon credential — the session lives in the
+    roomieorder never stores a Costco credential — the session lives in the
     persistent Chromium profile (``profile_dir``). Run this once; later
     ``dry-run`` / live orders reuse the saved cookies. Disable 2FA on the
     account first: the automated buy flow halts on any login challenge.
     """
-    from roomieorder.purchase import AmazonPurchaser
+    from roomieorder.purchase import CostcoPurchaser
 
     config = load_config()
-    purchaser = AmazonPurchaser(config)
+    purchaser = CostcoPurchaser(config)
 
     def wait_for_operator(page: object) -> None:
-        click.echo(f"opened {config.amazon_domain} on profile {config.profile_dir}")
+        click.echo(f"opened {config.costco_domain} on profile {config.profile_dir}")
         click.pause(info="log in, then press any key here to save the session and close…")
         if purchaser.is_logged_in(page):
             click.echo("✓ signed in — session saved to the profile")
@@ -184,7 +184,7 @@ def dry_run(item_key: str) -> None:
     Forces DRY_RUN regardless of the env flag, so this is always safe to run
     while filling out the §8 checklist.
     """
-    from roomieorder.purchase import AmazonPurchaser
+    from roomieorder.purchase import CostcoPurchaser
 
     config = load_config()
     config = config.model_copy(update={"dry_run": True})
@@ -195,7 +195,7 @@ def dry_run(item_key: str) -> None:
 
     store = Store(config.db_path)
     store.init_db()
-    purchaser = AmazonPurchaser(config)
+    purchaser = CostcoPurchaser(config)
 
     def proceed_check(live_price: float):  # type: ignore[no-untyped-def]
         ceiling = check_price_ceiling(item, live_price)
@@ -203,7 +203,7 @@ def dry_run(item_key: str) -> None:
             return ceiling
         return check_spend_cap(store, config, live_price * item.qty)
 
-    click.echo(f"dry-run {item_key} → {item.url or config.product_url(item.asin)}")
+    click.echo(f"dry-run {item_key} → {item.url or config.product_url(item.item_number)}")
     result = purchaser.buy(item_key, item, proceed_check)
     click.echo(f"status:     {result.status}")
     click.echo(f"unit_price: {result.unit_price}")

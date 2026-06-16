@@ -11,7 +11,7 @@ from roomieorder.catalog import CatalogError, load_catalog
 def test_load_ok(catalog_path: Path) -> None:
     cat = load_catalog(catalog_path)
     assert set(cat) == {"paper_towels", "dish_soap"}
-    assert cat["paper_towels"].asin == "B07ABCDEFG"
+    assert cat["paper_towels"].item_number == "1640526"
     assert cat["dish_soap"].qty == 2
     # category is presentation-only and defaults to "" when absent.
     assert cat["paper_towels"].category == ""
@@ -24,7 +24,7 @@ def test_category_roundtrips(tmp_path: Path) -> None:
             {
                 "x": {
                     "title": "t",
-                    "asin": "B07ABCDEFG",
+                    "item_number": "1640526",
                     "expected_price": 1,
                     "price_ceiling": 2,
                     "category": "Kitchen",
@@ -47,17 +47,19 @@ def test_bad_json(tmp_path: Path) -> None:
         load_catalog(p)
 
 
-def test_bad_asin(tmp_path: Path) -> None:
+def test_bad_item_number(tmp_path: Path) -> None:
     p = tmp_path / "c.json"
-    p.write_text(json.dumps({"x": {"title": "t", "asin": "short", "expected_price": 1, "price_ceiling": 2}}))
-    with pytest.raises(CatalogError, match="asin"):
+    p.write_text(
+        json.dumps({"x": {"title": "t", "item_number": "B07X", "expected_price": 1, "price_ceiling": 2}})
+    )
+    with pytest.raises(CatalogError, match="item_number"):
         load_catalog(p)
 
 
 def test_ceiling_below_expected_rejected(tmp_path: Path) -> None:
     p = tmp_path / "c.json"
     p.write_text(
-        json.dumps({"x": {"title": "t", "asin": "B07ABCDEFG", "expected_price": 30, "price_ceiling": 20}})
+        json.dumps({"x": {"title": "t", "item_number": "1640526", "expected_price": 30, "price_ceiling": 20}})
     )
     with pytest.raises(CatalogError, match="price_ceiling"):
         load_catalog(p)

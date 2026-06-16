@@ -5,7 +5,7 @@ import pytest
 from roomieorder.config import Config
 from roomieorder.purchase import (
     _PLACE_ORDER_SELECTORS,
-    AmazonPurchaser,
+    CostcoPurchaser,
     looks_like_challenge,
     looks_like_signin,
     parse_price,
@@ -30,11 +30,11 @@ def test_parse_price(text: str, expected: float | None) -> None:
 @pytest.mark.parametrize(
     "text,url,expected",
     [
-        ("Enter the characters you see below", "", True),
-        ("normal product page", "https://www.amazon.com/dp/B07X", False),
-        ("", "https://www.amazon.com/ap/cvf/request", True),
-        ("Verify it's you to continue", "", True),
-        ("Solve this puzzle", "", True),
+        ("Access Denied", "", True),
+        ("normal product page", "https://www.costco.com/x.product.123.html", False),
+        ("", "https://www.costco.com/_sec/verify", True),
+        ("Pardon Our Interruption", "", True),
+        ("Please verify you are human", "", True),
     ],
 )
 def test_looks_like_challenge(text: str, url: str, expected: bool) -> None:
@@ -44,11 +44,11 @@ def test_looks_like_challenge(text: str, url: str, expected: bool) -> None:
 @pytest.mark.parametrize(
     "text,url,expected",
     [
-        ("Sign in or create account", "", True),
-        ("Enter mobile number or email", "", True),
-        ("", "https://www.amazon.com/ap/signin?openid", True),
-        ("Secure checkout — Place your order", "", False),
-        ("normal product page", "https://www.amazon.com/dp/B07X", False),
+        ("Sign In / Register", "", True),
+        ("Sign in or register to continue", "", True),
+        ("", "https://signin.costco.com/?return=x", True),
+        ("Checkout — Place Order", "", False),
+        ("normal product page", "https://www.costco.com/x.product.123.html", False),
     ],
 )
 def test_looks_like_signin(text: str, url: str, expected: bool) -> None:
@@ -96,7 +96,7 @@ class _RoleLocator:
 class _FakePage:
     """Minimal stand-in for a Playwright page that models the checkout race:
     the place-order button is absent until ``wait_for_selector`` is awaited,
-    mimicking Amazon's JS rendering the body after navigation."""
+    mimicking Costco's JS rendering the body after navigation."""
 
     def __init__(
         self, reveal_on_wait: set[str] | None = None, role_text: bool = False
@@ -121,8 +121,8 @@ class _FakePage:
         self.present |= self._reveal
 
 
-def _purchaser(config: Config) -> AmazonPurchaser:
-    return AmazonPurchaser(config)
+def _purchaser(config: Config) -> CostcoPurchaser:
+    return CostcoPurchaser(config)
 
 
 def test_click_first_misses_unrendered_button(config: Config) -> None:

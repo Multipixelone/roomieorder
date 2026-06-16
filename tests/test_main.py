@@ -14,7 +14,7 @@ from roomieorder.store import Status
 
 
 class FakePurchaser:
-    """Stand-in for AmazonPurchaser — never launches a browser.
+    """Stand-in for CostcoPurchaser — never launches a browser.
 
     Honours the proceed_check callback (so guard wiring is exercised) and
     returns whatever ``result_status`` the test asked for.
@@ -45,7 +45,7 @@ class FakePurchaser:
 def client(config: Config, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     # Fast worker tick + no real browser.
     monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
-    monkeypatch.setattr("roomieorder.main.AmazonPurchaser", FakePurchaser)
+    monkeypatch.setattr("roomieorder.main.CostcoPurchaser", FakePurchaser)
     from roomieorder.main import create_app
 
     app = create_app(config)
@@ -116,7 +116,7 @@ def test_items_reports_cooldown(client: TestClient) -> None:
 
 def test_worker_pauses_on_challenge(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
-    monkeypatch.setattr("roomieorder.main.AmazonPurchaser", FakePurchaser)
+    monkeypatch.setattr("roomieorder.main.CostcoPurchaser", FakePurchaser)
     FakePurchaser.result_status = "challenge"
     try:
         from roomieorder.main import create_app

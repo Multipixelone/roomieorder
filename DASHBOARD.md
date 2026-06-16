@@ -49,7 +49,7 @@ For an item with key `dish_soap`, three things must line up:
 | Order script         | `script.order_dish_soap`           | per-item HA script    |
 | Card `tap_action`    | `perform-action` → `script.order_dish_soap` | this view    |
 
-The card only ever fires the script; price/ASIN/cooldown all live server-side in
+The card only ever fires the script; price/item number/cooldown all live server-side in
 `catalog.json`, so a mis-typed card can't order the wrong thing or skip a guard.
 
 ## Layout: full-width 6-across grid

@@ -1,7 +1,7 @@
 [project]
 name = "roomieorder"
 version = "0.1.0"
-description = "Home Assistant button → automatic Amazon order → Google Sheets log"
+description = "Home Assistant button → automatic Costco order → Google Sheets log"
 requires-python = ">=3.12"
 dependencies = [
   "pydantic>=2.6",

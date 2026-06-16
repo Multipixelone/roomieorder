@@ -1,5 +1,5 @@
 {
-  description = "roomieorder — HA button → automatic Amazon order → Google Sheets log";
+  description = "roomieorder — HA button → automatic Costco order → Google Sheets log";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

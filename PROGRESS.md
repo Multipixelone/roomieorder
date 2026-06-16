@@ -12,7 +12,7 @@ Running log of the build. Newest entries at the bottom of each phase.
   (`openclaw message send --channel … --target … --message …`).
 - **Purchase module**: full Playwright buy flow written, but only the
   `DRY_RUN` / non-browser paths are exercised in this build. The real buy and
-  the one-time manual Amazon login are left for the operator (see §8 of PLAN).
+  the one-time manual Costco login are left for the operator (see §8 of PLAN).
 - **Config**: env vars + `catalog.json` (per the README), not a TOML file.
   Lighter than commutecompass; secrets stay in env / the browser profile.
 - **Conventions mirror `commutecop`**: flake-utils + git-hooks.nix, hatchling
@@ -46,7 +46,7 @@ NixOS module eval). 45 tests pass.
   (CAPTCHA/OTP/"verify it's you") that returns `challenge` instead of looping,
   screenshot on every failure, DRY_RUN stops at the review page. Only the pure
   helpers (`parse_price`, `looks_like_challenge`) are unit-tested; the browser
-  path needs a real display + Amazon login.
+  path needs a real display + Costco login.
 - **main.py** — FastAPI intake (`/reorder`, `/health`, `/queue`) + worker
   thread (sync Playwright can't share the asyncio loop). Worker pauses on
   challenge/failure/spend-cap (PLAN §5).
@@ -72,10 +72,10 @@ check` + Attic push.
 - [x] Create a Google service account, share the Sheet with its email; set
       `GOOGLE_SERVICE_ACCOUNT_JSON` + `ROOMIEORDER_SHEET_ID`.
 - [x] Create/reuse an OpenClaw Telegram target; set `OPENCLAW_TARGET`.
-- [ ] Populate `catalog.json` with real ASINs + price ceilings (current
-      entries are placeholders with fake ASINs).
-- [ ] Launch the Chromium profile once, log into Amazon, confirm default
-      address + 1-tap payment.
+- [ ] Populate `catalog.json` with real Costco item numbers + slug URLs +
+      price ceilings (current entries are placeholders — verify each URL).
+- [ ] Launch the Chromium profile once, log into Costco, confirm default
+      shipping address + saved payment.
 - [ ] `roomieorder dry-run <item>` for each staple until it reaches the review
       page, _then_ flip `DRY_RUN=false` for one cheap item.
 

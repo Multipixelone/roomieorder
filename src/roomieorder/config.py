@@ -77,8 +77,8 @@ class Config(BaseModel):
     profile_dir: Path = Path("data/profile")
     shots_dir: Path = Path("data/shots")
 
-    # Amazon
-    amazon_domain: str = "amazon.com"
+    # Costco
+    costco_domain: str = "costco.com"
     wayland: bool = False
 
     # Google Sheets — logging is disabled when sheet_id is empty.
@@ -99,9 +99,15 @@ class Config(BaseModel):
     def notify_enabled(self) -> bool:
         return bool(self.openclaw_target)
 
-    def product_url(self, asin: str) -> str:
-        """Canonical product URL for an ASIN on the configured domain."""
-        return f"https://www.{self.amazon_domain}/dp/{asin}"
+    def product_url(self, item_number: str) -> str:
+        """Fallback product URL for an item number on the configured domain.
+
+        Costco has no clean ``/dp/<id>`` form: a real product URL carries a
+        slug (``.../kirkland-…product.<id>.html``). Prefer ``item.url`` from the
+        catalog, which has the slug; this slugless form is only a last resort.
+        """
+        # TODO(costco): confirm the slugless .product.<id>.html form redirects.
+        return f"https://www.{self.costco_domain}/.product.{item_number}.html"
 
 
 def load_config() -> Config:
@@ -123,7 +129,7 @@ def load_config() -> Config:
         db_path=Path(_env_str("ROOMIEORDER_DB", "data/state.sqlite")),
         profile_dir=Path(_env_str("ROOMIEORDER_PROFILE_DIR", "data/profile")),
         shots_dir=Path(_env_str("ROOMIEORDER_SHOTS_DIR", "data/shots")),
-        amazon_domain=_env_str("ROOMIEORDER_AMAZON_DOMAIN", "amazon.com"),
+        costco_domain=_env_str("ROOMIEORDER_COSTCO_DOMAIN", "costco.com"),
         wayland=_env_bool("ROOMIEORDER_WAYLAND", False),
         google_service_account_json=_env_str("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
         sheet_id=_env_str("ROOMIEORDER_SHEET_ID", ""),

@@ -56,7 +56,7 @@ let
 in
 {
   options.services.roomieorder = {
-    enable = lib.mkEnableOption "roomieorder Amazon auto-buy service (user session)";
+    enable = lib.mkEnableOption "roomieorder Costco auto-buy service (user session)";
 
     package = lib.mkOption {
       type = lib.types.package;
@@ -67,7 +67,7 @@ in
 
     catalogFile = lib.mkOption {
       type = lib.types.path;
-      description = "Path to catalog.json (item_key → ASIN/price/cooldown).";
+      description = "Path to catalog.json (item_key → item_number/price/cooldown).";
     };
 
     environmentFile = lib.mkOption {
@@ -80,7 +80,7 @@ in
           ROOMIEORDER_SHEET_ID
           OPENCLAW_TARGET              (if you'd rather keep the chat id secret)
 
-        Amazon is NOT a credential here — the login lives in the persistent
+        Costco is NOT a credential here — the login lives in the persistent
         Chromium profile under the state dir after a one-time manual sign-in.
       '';
     };
@@ -132,7 +132,7 @@ in
 
   config = lib.mkIf cfg.enable {
     systemd.user.services.roomieorder = {
-      description = "roomieorder — HA button → Amazon order → Google Sheets";
+      description = "roomieorder — HA button → Costco order → Google Sheets";
       wantedBy = [ "graphical-session.target" ];
       partOf = [ "graphical-session.target" ];
       after = [ "graphical-session.target" ];

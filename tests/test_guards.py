@@ -56,7 +56,7 @@ def test_intake_blocks_when_paused(store: Store, config: Config) -> None:
 
 
 def test_price_ceiling() -> None:
-    item = CatalogItem(title="t", asin="B07ABCDEFG", expected_price=24.99, price_ceiling=32.0)
+    item = CatalogItem(title="t", item_number="1640526", expected_price=24.99, price_ceiling=32.0)
     assert check_price_ceiling(item, 30.0).ok is True
     blocked = check_price_ceiling(item, 33.0)
     assert blocked.ok is False

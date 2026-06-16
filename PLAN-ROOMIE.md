@@ -29,7 +29,7 @@ This is the same shape as `modules/link/commutecompass.nix` — copy its idioms.
 ## 1. Secrets — `nix-secrets` repo
 
 The module takes a single **`environmentFile`** (an env file) plus a
-**`catalogFile`**. The Amazon login is *not* a secret — it lives in the
+**`catalogFile`**. The Costco login is *not* a secret — it lives in the
 persistent Chromium profile after a one-time manual sign-in.
 
 ### 1a. Create the env-file secret
@@ -82,10 +82,11 @@ degrades to a no-op logger. You can ship without 1b and add it later.
 
 ### 1c. Catalog
 
-`catalog.json` holds ASINs + price ceilings — not secret. Either commit a real
-one into the infra repo and reference it, or keep it in `nix-secrets`
-(`roomieorder/catalog.json`, plaintext). The placeholder catalog in the app
-repo has **fake ASINs** — it must be replaced with real ones before going live.
+`catalog.json` holds Costco item numbers (+ product URLs) + price ceilings —
+not secret. Either commit a real one into the infra repo and reference it, or
+keep it in `nix-secrets` (`roomieorder/catalog.json`, plaintext). The
+placeholder catalog in the app repo has **unverified item numbers/URLs** — they
+must be replaced with real ones (and each URL checked) before going live.
 
 > **⚠️ Single source — point both consumers at the *same* file.** The catalog
 > is read in two places: the **service** on `link`
@@ -213,21 +214,25 @@ never maintain a second list.
 | `scripts` | list of `{ id; alias; sequence; }` | infra's **`iotHass.nixScripts`** |
 | `scriptsAttrs` | `{ "order_<key>" = {…}; }` | upstream `config.script` (don't use here — conflicts with `script ui: !include`) |
 | `sensors` | a `rest:` list (one fetch, one sensor per item) | `services.home-assistant.config.rest` |
-| `dashboardCard` | a `type: grid` of plain buttons | any Lovelace view |
-| `dashboardCardDynamic` | same grid, but each item grays out while on cooldown | any Lovelace view (needs `sensors` wired) |
+| `dashboardCard` | a `type: grid` of plain (core) buttons — HACS-free | any Lovelace view |
+| `dashboardCardDynamic` | Mushroom grid that grays items out while on cooldown, grouped by `category` | any Lovelace view (needs `sensors` wired + HACS `mushroom`) |
 
-Two optional args control the status side: `pollSeconds` (default `30`, how
-often the sensors re-poll `GET /items`) and `statusSensorPrefix` (default
-`roomieorder_`, so item `paper_towels` → `sensor.roomieorder_paper_towels`).
+Three optional args control presentation/status: `pollSeconds` (default `30`,
+how often the sensors re-poll `GET /items`), `statusSensorPrefix` (default
+`roomieorder_`, so item `paper_towels` → `sensor.roomieorder_paper_towels`), and
+`dashboardColumns` (default `2`, cards per row in the generated grids).
 
 **Gray-out behavior.** `sensors` polls the service's `GET /items`, which reports
 per-item `last_placed_at`, `cooldown_days`, and an `on_cooldown` flag (true while
 the item is inside its catalog `cooldown_days` window of the last *placed* order).
 `dashboardCardDynamic` reads `sensor.<prefix><key>`'s `on_cooldown` attribute:
-while it's true the button is swapped for a grayed-out card naming when it was
-last ordered, so an item that was bought recently can't be re-ordered (the intake
-cooldown guard would reject it anyway, §5). It's two stacked `conditional` cards
-per item — pure core, no HACS/`custom:button-card`.
+while it's true the card grays out (`icon_color: disabled`) and its secondary
+line names when the item was last ordered, so an item that was bought recently
+reads as unavailable (the intake cooldown guard would reject a tap anyway, §5).
+It's one `custom:mushroom-template-card` per item, so the HACS `mushroom`
+frontend must be installed. Items that set a catalog `category` are grouped under
+a `## <category>` markdown heading. (The plain `dashboardCard` stays core-only
+for HACS-free setups.)
 
 > **Only placed orders gray a button.** `on_cooldown` is computed from the last
 > `placed` row, exactly like the cooldown guard. In `dryRun` mode orders land as
@@ -274,19 +279,21 @@ input is pinned, the buttons only change when you bump the roomieorder input
 
 ### The dashboard buttons
 
-Two grids are on offer. `buttons.dashboardCard` is a plain `type: grid` of one
-button per item. `buttons.dashboardCardDynamic` is the same grid but each item
-grays out and shows when it was last ordered while inside its cooldown window —
-**use this one** for the requested behavior (it needs `buttons.sensors` wired
-into `config.rest`, above). Both use the optional `button`/`icon` fields from
-`catalog.json`, falling back to the title and `mdi:cart`. Drop one into whichever
-Lovelace view you keep:
+Two grids are on offer. `buttons.dashboardCard` is a plain, HACS-free `type: grid`
+of one core button per item. `buttons.dashboardCardDynamic` is a Mushroom grid
+where each item grays out and shows when it was last ordered while inside its
+cooldown window — **use this one** for the requested behavior (it needs
+`buttons.sensors` wired into `config.rest`, above, and the HACS `mushroom`
+frontend installed). Both use the optional `button`/`icon` fields from
+`catalog.json`, falling back to the title and `mdi:cart`; the dynamic grid also
+groups by the optional `category` field. Card density is set by `dashboardColumns`
+(default `2`). Drop one into whichever Lovelace view you keep:
 
-- **If dashboards are UI-managed** (storage mode): the `conditional`/`markdown`
-  cards in `dashboardCardDynamic` are all core types, so paste the rendered YAML
-  into the UI's raw-config editor, or have a Claude with the **ha-mcp** server
-  push it live via `ha_config_set_dashboard`. (Plain taps still work if you'd
-  rather hand-place `dashboardCard`'s buttons → `script.order_<item>`.)
+- **If dashboards are UI-managed** (storage mode): paste the rendered YAML into
+  the UI's raw-config editor, or have a Claude with the **ha-mcp** server push it
+  live via `ha_config_set_dashboard`. The dynamic grid needs HACS `mushroom`; if
+  you'd rather stay core-only, hand-place `dashboardCard`'s buttons →
+  `script.order_<item>`.
 - **If a dashboard is Nix-managed**: splice `buttons.dashboardCardDynamic` into
   that view's `cards`. (The standalone `nixosModules.homeAssistant` can also set
   a whole "Reorder" view via `lovelaceConfig` with `dashboard = true` — it now
@@ -295,9 +302,10 @@ Lovelace view you keep:
   the UI.)
 
 > The gray-out is driven entirely by the service's `GET /items`. If the sensors
-> read `unavailable`, the `conditional` falls through to the active button (taps
-> still work) — a poll failure degrades to the plain grid, it doesn't lock you
-> out. Tune freshness with `pollSeconds`; it can't be more current than one poll
+> read `unavailable`, `is_state_attr(..., 'on_cooldown', true)` is false, so the
+> card stays the active teal button (taps still work) — a poll failure degrades
+> to the plain grid, it doesn't lock you out. Tune freshness with `pollSeconds`;
+> it can't be more current than one poll
 > interval, so a 30 s poll means a tapped button may stay live for up to 30 s
 > before it grays.
 
@@ -323,13 +331,16 @@ No per-roommate attribution: every tap logs as `household` (the default
 
 Do these on `link`, logged into the graphical session, in order:
 
-1. **Amazon login.** Launch the persistent profile once and sign in by hand:
+1. **Costco login.** Launch the persistent profile once and sign in by hand:
    ```
    roomieorder login    # opens the headed browser on the profile, waits for you
    ```
    Log in in that window, then press any key in the terminal to save & close;
    the session persists in `~/.local/state/roomieorder/profile`. Confirm a
-   default shipping address and 1-tap / default payment are set on the account.
+   default shipping address and saved / default payment are set on the account.
+   **This is also the first real test of whether Akamai tolerates the automated
+   profile at all** — if you hit an "Access Denied" / "Pardon Our Interruption"
+   wall here, the buy flow won't work and the approach needs rethinking.
 2. **Verify each item reaches the review page** (still `DRY_RUN=true`):
    `roomieorder dry-run <item>` for every catalog key — it stops at the review
    page and screenshots to `~/.local/state/roomieorder/shots/`.
@@ -355,5 +366,5 @@ CLI reference (all on `link`, env from the same file): `serve`, `init-db`,
 - [ ] `infra`: firewall opens 8723 from iot to link
 - [ ] `infra`: `modules/iot/roomieorder.nix` — `lib.haButtons` → `rest_command` + `rest` (status sensors) + `iotHass.nixScripts` (generated from catalog); splice `dashboardCardDynamic` into a view for the grayed-out buttons
 - [ ] Deploy link + iot
-- [ ] Manual bring-up §4 (Amazon login, dry-run each item, one real buy)
-- [ ] Replace placeholder ASINs in the catalog with real ones
+- [ ] Manual bring-up §4 (Costco login, dry-run each item, one real buy)
+- [ ] Replace placeholder item numbers/URLs in the catalog with real, verified ones

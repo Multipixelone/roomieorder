@@ -12,7 +12,7 @@ def test_defaults_when_env_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = load_config()
     assert cfg.dry_run is True
     assert cfg.port == 8723
-    assert cfg.amazon_domain == "amazon.com"
+    assert cfg.costco_domain == "costco.com"
     assert cfg.sheets_enabled is False
     assert cfg.notify_enabled is False
 
@@ -36,8 +36,8 @@ def test_bad_number_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_product_url() -> None:
-    cfg = Config(amazon_domain="amazon.co.uk")
-    assert cfg.product_url("B07ABCDEFG") == "https://www.amazon.co.uk/dp/B07ABCDEFG"
+    cfg = Config(costco_domain="costco.ca")
+    assert cfg.product_url("1640526") == "https://www.costco.ca/.product.1640526.html"
 
 
 def test_sheets_enabled_needs_both() -> None:
