@@ -4,9 +4,13 @@ import pytest
 
 from roomieorder.config import Config
 from roomieorder.purchase import (
+    _JSONLD_SELECTOR,
     _PLACE_ORDER_SELECTORS,
+    _PRICE_META_SELECTORS,
+    _PRICE_SELECTORS,
     _SIGNIN_SUBMIT_SELECTORS,
     CostcoPurchaser,
+    _price_from_jsonld,
     looks_like_challenge,
     looks_like_signin,
     parse_price,
@@ -28,6 +32,33 @@ _ACCOUNT_NAV = "[automation-id='accountMenuButton']"
 )
 def test_parse_price(text: str, expected: float | None) -> None:
     assert parse_price(text) == expected
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        # Bare Product with a single offer.
+        ('{"@type":"Product","offers":{"@type":"Offer","price":"24.99"}}', 24.99),
+        # Numeric (not string) price.
+        ('{"offers":{"price":24.99}}', 24.99),
+        # @graph wrapper with the Product node buried among others.
+        (
+            '{"@graph":[{"@type":"BreadcrumbList"},'
+            '{"@type":"Product","offers":{"price":"19.49"}}]}',
+            19.49,
+        ),
+        # AggregateOffer price range → take the floor.
+        ('{"offers":{"@type":"AggregateOffer","lowPrice":"11.99","highPrice":"15"}}', 11.99),
+        # List of offers.
+        ('{"offers":[{"price":"7.50"},{"price":"9.99"}]}', 7.50),
+        # No offer price anywhere.
+        ('{"@type":"Product","name":"Bath Tissue"}', None),
+        # Not valid JSON.
+        ("not json at all", None),
+    ],
+)
+def test_price_from_jsonld(raw: str, expected: float | None) -> None:
+    assert _price_from_jsonld(raw) == expected
 
 
 @pytest.mark.parametrize(
@@ -168,6 +199,71 @@ def test_wait_for_any_returns_false_on_timeout(config: Config) -> None:
             raise TimeoutError("no selector")
 
     assert _purchaser(config)._wait_for_any(_NeverPage(), _PLACE_ORDER_SELECTORS) is False
+
+
+class _PriceLocator:
+    """Stand-in for a price/meta/JSON-LD locator. ``texts`` is the list of
+    matches; ``attr`` is the meta ``content`` value. An empty match models a
+    selector that isn't in the DOM (count 0)."""
+
+    def __init__(self, texts: list[str], attr: str | None = None) -> None:
+        self._texts = texts
+        self._attr = attr
+
+    @property
+    def first(self) -> "_PriceLocator":
+        return self
+
+    def nth(self, i: int) -> "_PriceLocator":
+        return _PriceLocator([self._texts[i]])
+
+    def count(self) -> int:
+        return len(self._texts)
+
+    def inner_text(self, timeout: int | None = None) -> str:
+        return self._texts[0]
+
+    def get_attribute(self, name: str, timeout: int | None = None) -> str | None:
+        return self._attr
+
+
+class _PricePage:
+    """Models a product page for _read_price: a map of selector → locator lets
+    a test put the price in the visible element, a meta tag, or a JSON-LD block
+    and confirm the fallback order."""
+
+    def __init__(self, matches: dict[str, _PriceLocator]) -> None:
+        self._matches = matches
+
+    def locator(self, selector: str) -> _PriceLocator:
+        return self._matches.get(selector, _PriceLocator([]))
+
+
+def test_read_price_prefers_visible_selector(config: Config) -> None:
+    page = _PricePage(
+        {
+            _PRICE_SELECTORS[0]: _PriceLocator(["$24.99"]),
+            _PRICE_META_SELECTORS[0]: _PriceLocator(["x"], attr="99.99"),
+        }
+    )
+    assert _purchaser(config)._read_price(page) == 24.99
+
+
+def test_read_price_falls_back_to_meta_tag(config: Config) -> None:
+    # No visible price element; the price is only in an OpenGraph meta tag.
+    page = _PricePage({_PRICE_META_SELECTORS[1]: _PriceLocator(["x"], attr="$18.49")})
+    assert _purchaser(config)._read_price(page) == 18.49
+
+
+def test_read_price_falls_back_to_jsonld(config: Config) -> None:
+    # Neither the visible element nor a meta tag; only the JSON-LD block.
+    blob = '{"@type":"Product","offers":{"price":"32.99"}}'
+    page = _PricePage({_JSONLD_SELECTOR: _PriceLocator([blob])})
+    assert _purchaser(config)._read_price(page) == 32.99
+
+
+def test_read_price_returns_none_when_no_source(config: Config) -> None:
+    assert _purchaser(config)._read_price(_PricePage({})) is None
 
 
 class _LoginLocator:

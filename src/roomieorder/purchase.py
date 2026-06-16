@@ -33,6 +33,7 @@ and MUST be confirmed during bring-up (`roomieorder login` / `dry-run`).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -102,6 +103,20 @@ _PRICE_SELECTORS = (
     ".product-price .value",
     "span.value",
 )
+# Structured-data price sources, tried after the visible selectors miss. The
+# `/p/-/<slug>/<id>` storefront is a server-rendered Next.js app that emits the
+# product's price as standard page metadata, present in the initial HTML and
+# unambiguously the *product's* price (not a recommendations-carousel
+# neighbour's). These survive the CSS/automation-id churn that breaks
+# _PRICE_SELECTORS, so they're the durable fallback when the visible price
+# element can't be located. `<meta>` tags carry the value in their `content`
+# attribute; JSON-LD blocks carry it under `offers.price` (see _price_from_jsonld).
+_PRICE_META_SELECTORS = (
+    "meta[property='product:price:amount']",
+    "meta[property='og:price:amount']",
+    "meta[itemprop='price']",
+)
+_JSONLD_SELECTOR = "script[type='application/ld+json']"
 # Costco has no one-click Buy Now — only Add to Cart (see _start_checkout).
 # TODO(costco): verify against live DOM — add-to-cart control.
 _ADD_TO_CART_SELECTORS = (
@@ -169,6 +184,55 @@ def parse_price(text: str) -> Optional[float]:
         return float(f"{whole}.{frac}") if frac else float(whole)
     except ValueError:
         return None
+
+
+def _extract_offer_price(offers: object) -> Optional[float]:
+    """First parseable ``price``/``lowPrice`` in a schema.org ``offers`` value.
+
+    ``offers`` is either a single Offer/AggregateOffer object or a list of them;
+    handle both. ``lowPrice`` covers AggregateOffer (a price range) so a ranged
+    listing still yields its floor."""
+    for offer in offers if isinstance(offers, list) else [offers]:
+        if not isinstance(offer, dict):
+            continue
+        for key in ("price", "lowPrice"):
+            if key in offer:
+                price = parse_price(str(offer[key]))
+                if price is not None:
+                    return price
+    return None
+
+
+def _price_from_jsonld(raw: str) -> Optional[float]:
+    """Pull an offer price out of a schema.org JSON-LD blob, or None.
+
+    Costco's ``/p/`` pages embed product data as ``application/ld+json``. The
+    price lives under an ``offers`` key, but the surrounding shape varies (a bare
+    Product, a ``@graph`` list of nodes, nested arrays), so walk the whole parsed
+    structure for the first ``offers`` rather than hard-coding one layout."""
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+
+    def walk(node: object) -> Optional[float]:
+        if isinstance(node, dict):
+            if "offers" in node:
+                price = _extract_offer_price(node["offers"])
+                if price is not None:
+                    return price
+            for value in node.values():
+                price = walk(value)
+                if price is not None:
+                    return price
+        elif isinstance(node, list):
+            for item in node:
+                price = walk(item)
+                if price is not None:
+                    return price
+        return None
+
+    return walk(data)
 
 
 def looks_like_challenge(text: str, url: str = "") -> bool:
@@ -482,6 +546,40 @@ class CostcoPurchaser:
             except Exception:  # noqa: BLE001 — selector miss; try the next
                 continue
             price = parse_price(text)
+            if price is not None:
+                return price
+        # The visible price element couldn't be located (every _PRICE_SELECTORS
+        # is an unverified guess against a DOM nobody here can see). Fall back to
+        # the page's structured data, which is far less brittle.
+        return self._read_price_from_metadata(page)
+
+    def _read_price_from_metadata(self, page: object) -> Optional[float]:
+        """Read the product price from page metadata when the visible price
+        element can't be located: OpenGraph/schema.org ``<meta>`` tags first,
+        then JSON-LD ``offers``. Both are server-rendered into the initial HTML,
+        so they're present even before the price block hydrates."""
+        for sel in _PRICE_META_SELECTORS:
+            try:
+                loc = page.locator(sel).first  # type: ignore[attr-defined]
+                if loc.count() == 0:
+                    continue
+                content = loc.get_attribute("content", timeout=2_000)
+            except Exception:  # noqa: BLE001 — meta miss; try the next source
+                continue
+            price = parse_price(content or "")
+            if price is not None:
+                return price
+        try:
+            blocks = page.locator(_JSONLD_SELECTOR)  # type: ignore[attr-defined]
+            count = blocks.count()
+        except Exception:  # noqa: BLE001 — no JSON-LD to read
+            return None
+        for i in range(count):
+            try:
+                raw = blocks.nth(i).inner_text(timeout=2_000)
+            except Exception:  # noqa: BLE001 — unreadable block; try the next
+                continue
+            price = _price_from_jsonld(raw)
             if price is not None:
                 return price
         return None
