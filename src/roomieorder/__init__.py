@@ -1,3 +1,3 @@
-"""roomieorder — HA button → automatic Amazon order → Google Sheets log."""
+"""roomieorder — HA button → automatic Costco order → Google Sheets log."""
 
 __version__ = "0.1.0"

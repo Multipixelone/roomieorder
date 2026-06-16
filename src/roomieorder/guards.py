@@ -7,7 +7,7 @@ Two tiers:
   of the queue and give the tapper instant feedback.
 * **Execution guards** run in the worker once a live price is known — price
   ceiling and the rolling daily spend cap. These can only be checked against
-  the real Amazon page, so they live next to the buy.
+  the real Costco page, so they live next to the buy.
 
 All guards are pure functions of (store snapshot, config, catalog item); they
 never mutate state, so they're trivially testable.

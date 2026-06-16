@@ -29,7 +29,7 @@ This is the same shape as `modules/link/commutecompass.nix` — copy its idioms.
 ## 1. Secrets — `nix-secrets` repo
 
 The module takes a single **`environmentFile`** (an env file) plus a
-**`catalogFile`**. The Amazon login is *not* a secret — it lives in the
+**`catalogFile`**. The Costco login is *not* a secret — it lives in the
 persistent Chromium profile after a one-time manual sign-in.
 
 ### 1a. Create the env-file secret
@@ -82,10 +82,11 @@ degrades to a no-op logger. You can ship without 1b and add it later.
 
 ### 1c. Catalog
 
-`catalog.json` holds ASINs + price ceilings — not secret. Either commit a real
-one into the infra repo and reference it, or keep it in `nix-secrets`
-(`roomieorder/catalog.json`, plaintext). The placeholder catalog in the app
-repo has **fake ASINs** — it must be replaced with real ones before going live.
+`catalog.json` holds Costco item numbers (+ product URLs) + price ceilings —
+not secret. Either commit a real one into the infra repo and reference it, or
+keep it in `nix-secrets` (`roomieorder/catalog.json`, plaintext). The
+placeholder catalog in the app repo has **unverified item numbers/URLs** — they
+must be replaced with real ones (and each URL checked) before going live.
 
 > **⚠️ Single source — point both consumers at the *same* file.** The catalog
 > is read in two places: the **service** on `link`
@@ -330,13 +331,16 @@ No per-roommate attribution: every tap logs as `household` (the default
 
 Do these on `link`, logged into the graphical session, in order:
 
-1. **Amazon login.** Launch the persistent profile once and sign in by hand:
+1. **Costco login.** Launch the persistent profile once and sign in by hand:
    ```
    roomieorder login    # opens the headed browser on the profile, waits for you
    ```
    Log in in that window, then press any key in the terminal to save & close;
    the session persists in `~/.local/state/roomieorder/profile`. Confirm a
-   default shipping address and 1-tap / default payment are set on the account.
+   default shipping address and saved / default payment are set on the account.
+   **This is also the first real test of whether Akamai tolerates the automated
+   profile at all** — if you hit an "Access Denied" / "Pardon Our Interruption"
+   wall here, the buy flow won't work and the approach needs rethinking.
 2. **Verify each item reaches the review page** (still `DRY_RUN=true`):
    `roomieorder dry-run <item>` for every catalog key — it stops at the review
    page and screenshots to `~/.local/state/roomieorder/shots/`.
@@ -362,5 +366,5 @@ CLI reference (all on `link`, env from the same file): `serve`, `init-db`,
 - [ ] `infra`: firewall opens 8723 from iot to link
 - [ ] `infra`: `modules/iot/roomieorder.nix` — `lib.haButtons` → `rest_command` + `rest` (status sensors) + `iotHass.nixScripts` (generated from catalog); splice `dashboardCardDynamic` into a view for the grayed-out buttons
 - [ ] Deploy link + iot
-- [ ] Manual bring-up §4 (Amazon login, dry-run each item, one real buy)
-- [ ] Replace placeholder ASINs in the catalog with real ones
+- [ ] Manual bring-up §4 (Costco login, dry-run each item, one real buy)
+- [ ] Replace placeholder item numbers/URLs in the catalog with real, verified ones

@@ -1,8 +1,8 @@
 """The item catalog — the "kind I like" for each staple, keyed by item_key.
 
 Populated once by the operator (see catalog.json). The HA dashboard sends only
-an item_key; everything Amazon-specific (ASIN, ceiling, cooldown) is resolved
-here, so the dashboard never carries a price or a product id.
+an item_key; everything Costco-specific (item_number, ceiling, cooldown) is
+resolved here, so the dashboard never carries a price or a product id.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ class CatalogError(Exception):
 
 class CatalogItem(BaseModel):
     title: str
-    asin: str
+    item_number: str
     url: str = ""
     qty: int = Field(default=1, ge=1, le=10)
     expected_price: float = Field(ge=0.0)
@@ -34,14 +34,15 @@ class CatalogItem(BaseModel):
     # Block re-order inside this many days of the last placed order.
     cooldown_days: int = Field(default=0, ge=0, le=365)
 
-    @field_validator("asin")
+    @field_validator("item_number")
     @classmethod
-    def _validate_asin(cls, v: str) -> str:
+    def _validate_item_number(cls, v: str) -> str:
         v = v.strip()
-        # Amazon ASINs are 10-char alphanumeric (B0… for most products).
-        if len(v) != 10 or not v.isalnum():
-            raise ValueError(f"asin must be 10 alphanumeric chars, got {v!r}")
-        return v.upper()
+        # Costco item numbers are numeric and variable length (the digits in a
+        # product URL's `.product.<id>.html`, or the shelf "item #").
+        if not v or not v.isdigit():
+            raise ValueError(f"item_number must be numeric, got {v!r}")
+        return v
 
     @field_validator("price_ceiling")
     @classmethod

@@ -28,7 +28,7 @@ python3Packages.buildPythonApplication rec {
   pythonImportsCheck = [ "roomieorder" ];
 
   meta = {
-    description = "HA button → automatic Amazon order → Google Sheets log";
+    description = "HA button → automatic Costco order → Google Sheets log";
     mainProgram = "roomieorder";
     license = lib.licenses.mit;
   };

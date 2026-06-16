@@ -13,17 +13,17 @@ from roomieorder.store import Store
 
 _CATALOG = {
     "paper_towels": {
-        "title": "Bounty Quick-Size 12 Family Rolls",
-        "asin": "B07ABCDEFG",
-        "url": "https://www.amazon.com/dp/B07ABCDEFG",
+        "title": "Bounty Advanced 12 Family Rolls",
+        "item_number": "1640526",
+        "url": "https://www.costco.com/bounty-advanced.product.1640526.html",
         "qty": 1,
         "expected_price": 24.99,
         "price_ceiling": 32.00,
         "cooldown_days": 10,
     },
     "dish_soap": {
-        "title": "Dawn Ultra 3-Pack",
-        "asin": "B07HIJKLMN",
+        "title": "Dawn Ultra 2-Pack",
+        "item_number": "1308124",
         "qty": 2,
         "expected_price": 11.99,
         "price_ceiling": 16.00,

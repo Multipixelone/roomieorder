@@ -8,9 +8,9 @@
 
 </div>
 
-A self-hosted [Python](https://www.python.org/) service that turns a Home Assistant dashboard button into an automatic Amazon order — logged to Google Sheets and notified via Telegram. No confirm step; roommates are trusted.
+A self-hosted [Python](https://www.python.org/) service that turns a Home Assistant dashboard button into an automatic Costco order — logged to Google Sheets and notified via Telegram. No confirm step; roommates are trusted.
 
-> note: drives real Amazon checkout via Playwright. brittle by nature, against Amazon's ToS, and requires a persistent logged-in browser profile.
+> note: drives real Costco checkout via Playwright. brittle by nature, against Costco's ToS, and requires a persistent logged-in browser profile. Costco fronts the site with Akamai bot detection, which is far more aggressive than most retailers' — the automation may be blocked outright.
 
 ## Architecture
 
@@ -37,7 +37,7 @@ Intake is always-on; execution needs a live graphical session. Requests sit in t
 
 ## Configuration
 
-`catalog.json` maps item keys to ASINs, quantities, expected prices, price ceilings, and cooldown windows. See [`examples/catalog.json`](./examples/) and [`examples/env.example`](./examples/) for the full schema.
+`catalog.json` maps item keys to Costco item numbers (+ product URLs), quantities, expected prices, price ceilings, and cooldown windows. See [`examples/catalog.json`](./examples/) and [`examples/env.example`](./examples/) for the full schema.
 
 ### Safety rails
 
@@ -69,7 +69,7 @@ script:
 
 ## Google Sheets logging
 
-Each order attempt appends a row: `timestamp | item_key | title | asin | qty | unit_price | order_total | order_id | status | requester | notes`
+Each order attempt appends a row: `timestamp | item_key | title | item_number | qty | unit_price | order_total | order_id | status | requester | notes`
 
 `status` ∈ `placed | dry_run | skipped_cooldown | price_blocked | failed | challenge`.
 

@@ -22,7 +22,7 @@ COLUMNS = [
     "timestamp",
     "item_key",
     "title",
-    "asin",
+    "item_number",
     "qty",
     "unit_price",
     "order_total",
@@ -43,7 +43,7 @@ class SheetRow(Protocol):
     timestamp: str
     item_key: str
     title: str
-    asin: str
+    item_number: str
     qty: int
     unit_price: Optional[float]
     order_total: Optional[float]
