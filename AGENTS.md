@@ -76,7 +76,8 @@ a normal product page as a sign-in wall.
 ## 3. Akamai bot-detection hardening — don't undo this
 
 The buy flow is deliberately hardened against Costco's Akamai bot detection
-across `purchase.py`, `config.py`, and `nix/module.nix`:
+across `purchase.py`, `config.py`, `nix/module.nix`, `nix/package.nix`, and
+`nix/patchright.nix`:
 
 - **Real Google Chrome, not bundled Chromium.** `_launch_context` passes
   `executable_path` (`ROOMIEORDER_CHROME_PATH`, set by the Nix module to
@@ -94,10 +95,17 @@ across `purchase.py`, `config.py`, and `nix/module.nix`:
   scripts — those backfire on Akamai (inconsistent, more detectable than
   doing nothing).
 
-**Pending follow-up:** patchright is not packaged in nixpkgs, so the deployed
-Nix build still runs vanilla Playwright — the real-Chrome fix is active, the
-CDP-leak fix is not. Packaging patchright's PyPI-fetched patched driver in
-`nix/package.nix` is the remaining work.
+**patchright in Nix is DONE — both stealth layers ship in the deployed build.**
+patchright isn't in nixpkgs, so it's packaged from its published PyPI wheel in
+`nix/patchright.nix` (`python3Packages.callPackage`, `format = "wheel"`; deps are
+just `pyee` + `greenlet`; per-system wheel URL + hash for x86_64 and aarch64) and
+added to `nix/package.nix` `propagatedBuildInputs`. The wheel bundles a foreign
+`driver/node` that can't run on NixOS, so `nix/module.nix` sets
+`PLAYWRIGHT_NODEJS_PATH = lib.getExe pkgs.nodejs` (patchright's
+`_impl/_driver.py` honours it over the bundle). We do **not** fetch patchright's
+Chromium-for-Testing — the buy flow launches real Chrome via `executable_path`.
+When bumping patchright, update the version + per-system hashes from the PyPI
+wheel digests.
 
 **Don't:** revert to bundled Chromium, or add stealth JS shims/custom headers
 to "improve" evasion — both are known to backfire here.
