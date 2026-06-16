@@ -5,11 +5,14 @@ import pytest
 from roomieorder.config import Config
 from roomieorder.purchase import (
     _PLACE_ORDER_SELECTORS,
+    _SIGNIN_SUBMIT_SELECTORS,
     CostcoPurchaser,
     looks_like_challenge,
     looks_like_signin,
     parse_price,
 )
+
+_ACCOUNT_NAV = "[automation-id='accountMenuButton']"
 
 
 @pytest.mark.parametrize(
@@ -44,9 +47,12 @@ def test_looks_like_challenge(text: str, url: str, expected: bool) -> None:
 @pytest.mark.parametrize(
     "text,url,expected",
     [
-        ("Sign In / Register", "", True),
+        # The header "Sign In / Register" link is on every logged-out page, so on
+        # its own it must NOT read as a wall (that was the product-page misfire).
+        ("Sign In / Register", "", False),
         ("Sign in or register to continue", "", True),
         ("", "https://signin.costco.com/?return=x", True),
+        ("bounced to logon", "https://www.costco.com/logon", True),
         ("Checkout — Place Order", "", False),
         ("normal product page", "https://www.costco.com/x.product.123.html", False),
     ],
@@ -162,3 +168,82 @@ def test_wait_for_any_returns_false_on_timeout(config: Config) -> None:
             raise TimeoutError("no selector")
 
     assert _purchaser(config)._wait_for_any(_NeverPage(), _PLACE_ORDER_SELECTORS) is False
+
+
+class _LoginLocator:
+    def __init__(self, page: "_LoginPage", selector: str) -> None:
+        self._page = page
+        self._selector = selector
+
+    @property
+    def first(self) -> "_LoginLocator":
+        return self
+
+    def count(self) -> int:
+        return 1 if self._selector in self._page.present else 0
+
+    def inner_text(self, timeout: int | None = None) -> str:
+        # Costco's account nav reads the login state.
+        return "Hello, Finn" if self._page.logged_in else "Sign In / Register"
+
+    def click(self, timeout: int | None = None) -> None:
+        self._page.clicked.append(self._selector)
+        # Submitting the prefilled logon form establishes the session.
+        if self._selector in _SIGNIN_SUBMIT_SELECTORS:
+            self._page.logged_in = True
+
+
+class _LoginRole:
+    """No role/text match — forces ensure_logged_in onto its selector backstops."""
+
+    @property
+    def first(self) -> "_LoginRole":
+        return self
+
+    def click(self, timeout: int | None = None) -> None:
+        raise TimeoutError("no role match")
+
+
+class _LoginPage:
+    """Models the cached-credential sign-in: starts logged out and the account
+    nav flips to a name once the prefilled logon form's submit is clicked."""
+
+    def __init__(self, *, logged_in: bool, present: set[str] | None = None) -> None:
+        self.logged_in = logged_in
+        self.present = present or set()
+        self.clicked: list[str] = []
+        self.goto_urls: list[str] = []
+
+    def locator(self, selector: str) -> _LoginLocator:
+        return _LoginLocator(self, selector)
+
+    def get_by_role(self, role: str, name: object = None) -> _LoginRole:
+        return _LoginRole()
+
+    def goto(self, url: str, wait_until: str | None = None) -> None:
+        self.goto_urls.append(url)
+
+    def wait_for_load_state(self, state: str, timeout: int | None = None) -> None:
+        pass
+
+
+def test_ensure_logged_in_short_circuits_when_already_logged_in(config: Config) -> None:
+    page = _LoginPage(logged_in=True, present={_ACCOUNT_NAV})
+    assert _purchaser(config).ensure_logged_in(page) is True
+    assert page.clicked == []
+    assert page.goto_urls == []
+
+
+def test_ensure_logged_in_clicks_cached_credential_submit(config: Config) -> None:
+    # Logged out, but the prefilled logon form's submit is in the DOM.
+    page = _LoginPage(logged_in=False, present={_ACCOUNT_NAV, _SIGNIN_SUBMIT_SELECTORS[0]})
+    assert _purchaser(config).ensure_logged_in(page) is True
+    # Reached the logon page (role link missed) and clicked the form's submit.
+    assert any("logon" in u for u in page.goto_urls)
+    assert _SIGNIN_SUBMIT_SELECTORS[0] in page.clicked
+
+
+def test_ensure_logged_in_fails_when_submit_never_takes(config: Config) -> None:
+    # Logged out and nothing to click — the caller must bail with manual login.
+    page = _LoginPage(logged_in=False, present={_ACCOUNT_NAV})
+    assert _purchaser(config).ensure_logged_in(page) is False
