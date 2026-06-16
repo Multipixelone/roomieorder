@@ -1,21 +1,23 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from roomieorder.catalog import AmazonSource, CatalogItem, load_catalog
 from roomieorder.config import Config
 from roomieorder.orchestrator import Orchestrator
 from roomieorder.purchase import PurchaseResult
-from roomieorder.store import Store
+from roomieorder.store import Status, Store
 
 
 def _make_fake(
     provider_name: str,
     *,
-    status: str = "placed",
+    status: Status = "placed",
     price: float | None = None,
     use_guard: bool = False,
-):
+) -> type[Any]:
     """Build a browser-free stand-in purchaser that returns a canned result.
 
     ``use_guard=True`` runs the real per-source ``proceed_check`` against
@@ -40,7 +42,12 @@ def _make_fake(
     return _Fake
 
 
-def _patch(monkeypatch: pytest.MonkeyPatch, *, costco=None, amazon=None) -> None:
+def _patch(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    costco: object | None = None,
+    amazon: object | None = None,
+) -> None:
     if costco is not None:
         monkeypatch.setattr("roomieorder.orchestrator.CostcoPurchaser", costco)
     if amazon is not None:
@@ -98,7 +105,7 @@ def test_amazon_only_item_skips_costco(
     config: Config, store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Costco fake raises if constructed — proves it's never in the chain.
-    def _boom(*a: object, **k: object):  # noqa: ANN002, ANN003
+    def _boom(*a: object, **k: object) -> None:  # noqa: ANN002, ANN003
         raise AssertionError("Costco should not be tried for an Amazon-only item")
 
     _patch(monkeypatch, costco=_boom, amazon=_make_fake("amazon", status="placed"))
