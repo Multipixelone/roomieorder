@@ -97,15 +97,21 @@ def check_intake(
     return _OK
 
 
-def check_price_ceiling(item: CatalogItem, live_price: float) -> GuardResult:
-    """Block the buy when the live price has blown past the catalog ceiling."""
-    if live_price > item.price_ceiling:
+def check_price_ceiling(title: str, price_ceiling: float, live_price: float) -> GuardResult:
+    """Block the buy when the live price has blown past the source's ceiling.
+
+    The ceiling is per-source (Costco and Amazon price the same staple
+    differently), so the caller passes the active source's ``price_ceiling``.
+    On the Costco leg a ``price_blocked`` result tells the orchestrator to fall
+    back to Amazon; on the last provider it's terminal.
+    """
+    if live_price > price_ceiling:
         return GuardResult(
             ok=False,
             status="price_blocked",
             reason=(
-                f"⛔ {item.title} is ${live_price:.2f}, over your "
-                f"${item.price_ceiling:.2f} ceiling — not ordering"
+                f"⛔ {title} is ${live_price:.2f}, over your "
+                f"${price_ceiling:.2f} ceiling — not ordering"
             ),
         )
     return _OK

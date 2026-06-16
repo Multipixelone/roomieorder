@@ -12,22 +12,34 @@ from roomieorder.config import Config
 from roomieorder.store import Store
 
 _CATALOG = {
+    # Two sources: Costco first, Amazon fallback.
     "paper_towels": {
         "title": "Bounty Advanced 12 Family Rolls",
-        "item_number": "1640526",
-        "url": "https://www.costco.com/bounty-advanced.product.1640526.html",
         "qty": 1,
-        "expected_price": 24.99,
-        "price_ceiling": 32.00,
         "cooldown_days": 10,
+        "costco": {
+            "item_number": "1640526",
+            "url": "https://www.costco.com/bounty-advanced.product.1640526.html",
+            "expected_price": 24.99,
+            "price_ceiling": 32.00,
+        },
+        "amazon": {
+            "asin": "B07YYYYYYY",
+            "url": "https://www.amazon.com/dp/B07YYYYYYY",
+            "expected_price": 23.99,
+            "price_ceiling": 30.00,
+        },
     },
+    # Costco-only: no Amazon fallback declared.
     "dish_soap": {
         "title": "Dawn Ultra 2-Pack",
-        "item_number": "1308124",
         "qty": 2,
-        "expected_price": 11.99,
-        "price_ceiling": 16.00,
         "cooldown_days": 0,
+        "costco": {
+            "item_number": "1308124",
+            "expected_price": 11.99,
+            "price_ceiling": 16.00,
+        },
     },
 }
 
