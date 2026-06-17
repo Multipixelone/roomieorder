@@ -28,9 +28,12 @@ class FakeOrchestrator:
 
     def buy(self, item_key: str, item: CatalogItem):  # type: ignore[no-untyped-def]
         price = item.costco.expected_price if item.costco else item.amazon.expected_price  # type: ignore[union-attr]
+        # A placed order records a real order_total (what the cap backstop reads).
+        order_total = price * item.qty if self.result_status == "placed" else None
         return PurchaseResult(
             status=self.result_status,
             unit_price=price,
+            order_total=order_total,
             provider="costco",
             message=f"[fake] {self.result_status} {item_key}",
         )
@@ -157,6 +160,28 @@ def test_startup_recovers_orphaned_in_progress(config: Config, monkeypatch: pyte
         rows = c.get("/queue").json()
         orphan = next(r for r in rows if r["id"] == rid)
         assert orphan["status"] == "failed"
+
+
+def test_worker_pauses_when_recorded_spend_breaches_cap(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
+    monkeypatch.setattr("roomieorder.main.Orchestrator", FakeOrchestrator)
+    # paper_towels Costco price 24.99 → a $20 cap is breached by the real total.
+    capped = config.model_copy(update={"dry_run": False, "daily_cap": 20.0})
+    FakeOrchestrator.result_status = "placed"
+    try:
+        from roomieorder.main import create_app
+
+        with TestClient(create_app(capped)) as c:
+            c.post("/reorder", json={"item_key": "paper_towels"})
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not c.get("/health").json()["paused"]:
+                time.sleep(0.05)
+            assert c.get("/health").json()["paused"] is True
+            assert "cap" in c.get("/health").json()["pause_reason"]
+    finally:
+        FakeOrchestrator.result_status = "dry_run"
 
 
 def test_worker_pauses_on_challenge(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:

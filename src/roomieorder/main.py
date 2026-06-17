@@ -188,6 +188,27 @@ class Engine:
         if result.status in _PAUSE_STATUSES:
             self.store.set_paused(True, result.message)
             _logger.warning("worker paused: %s", result.message)
+        elif result.status == "placed":
+            self._enforce_recorded_cap()
+
+    def _enforce_recorded_cap(self) -> None:
+        """Backstop the spend cap against *recorded* totals after a placed order.
+
+        The pre-buy guard checks ``live_price * qty``, but tax/shipping/fees only
+        land once the order total is scraped, so a run of orders can creep over
+        ``daily_cap`` in real money. Re-check the recorded trailing-24h spend and
+        pause before the next buy when it's actually breached. Can't unwind the
+        order just placed — it stops the *next* one."""
+        spent = self.store.spend_since(24.0)
+        if spent <= self.config.daily_cap:
+            return
+        reason = (
+            f"⛔ recorded 24h spend ${spent:.2f} is over the ${self.config.daily_cap:.2f} "
+            "cap once real totals landed — pausing before the next order"
+        )
+        self.store.set_paused(True, reason)
+        self.notifier.send(reason)
+        _logger.warning("worker paused: %s", reason)
 
     # ─────────── dashboard state ───────────
 
