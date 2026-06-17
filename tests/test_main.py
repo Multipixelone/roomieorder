@@ -109,6 +109,27 @@ def test_items_reports_cooldown(client: TestClient) -> None:
     assert client.get("/items").json()["dish_soap"]["on_cooldown"] is False
 
 
+def test_startup_recovers_orphaned_in_progress(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Simulate a crash: a row left in_progress in the DB before the app boots.
+    monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
+    monkeypatch.setattr("roomieorder.main.Orchestrator", FakeOrchestrator)
+    pre = Store(config.db_path)
+    pre.init_db()
+    rid = pre.enqueue("paper_towels")
+    pre.claim_next_pending()  # in_progress, never marked
+    pre.close()
+
+    from roomieorder.main import create_app
+
+    app = create_app(config)
+    with TestClient(app) as c:
+        # Startup recovery fails the orphan and pauses for review.
+        assert c.get("/health").json()["paused"] is True
+        rows = c.get("/queue").json()
+        orphan = next(r for r in rows if r["id"] == rid)
+        assert orphan["status"] == "failed"
+
+
 def test_worker_pauses_on_challenge(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
     monkeypatch.setattr("roomieorder.main.Orchestrator", FakeOrchestrator)

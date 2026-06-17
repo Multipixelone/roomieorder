@@ -188,6 +188,49 @@ class Store:
             self._conn.commit()
         return self._to_row(row) if row else None
 
+    def recover_stale(self) -> list[QueueRow]:
+        """Resolve rows left ``in_progress`` by a hard restart.
+
+        ``claim_next_pending`` only ever selects ``pending`` rows, so a process
+        death (SIGKILL, OOM, power loss, a systemd restart) between the claim and
+        the terminal ``mark`` strands the row ``in_progress`` forever — never
+        re-claimed, never failed, never surfaced. Run once at startup: a row that
+        already reached ``MAX_ATTEMPTS`` becomes ``failed`` (it reached the buy
+        and may have *placed* an order — a human must check, never auto-retry);
+        one still under the cap goes back to ``pending`` for another drain.
+
+        Returns the rows that were *failed* (the ones needing review), so the
+        caller can pause the worker and notify the operator. Idempotent: a second
+        call finds no ``in_progress`` rows and returns an empty list.
+        """
+        note = "recovered: stuck in_progress after a restart — may have been placed, needs review"
+        with self._lock:
+            stale = self._conn.execute(
+                "SELECT id, attempts FROM queue WHERE status='in_progress'"
+            ).fetchall()
+            now = _iso(_utcnow())
+            failed_ids: list[int] = []
+            for r in stale:
+                if r["attempts"] >= MAX_ATTEMPTS:
+                    self._conn.execute(
+                        "UPDATE queue SET status='failed', updated_at=?, notes=? WHERE id=?",
+                        (now, note, r["id"]),
+                    )
+                    failed_ids.append(r["id"])
+                else:
+                    self._conn.execute(
+                        "UPDATE queue SET status='pending', updated_at=? WHERE id=?",
+                        (now, r["id"]),
+                    )
+            self._conn.commit()
+            if not failed_ids:
+                return []
+            placeholders = ",".join("?" for _ in failed_ids)
+            rows = self._conn.execute(
+                f"SELECT * FROM queue WHERE id IN ({placeholders}) ORDER BY id", failed_ids
+            ).fetchall()
+        return [self._to_row(r) for r in rows]
+
     def mark(
         self,
         row_id: int,

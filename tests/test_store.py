@@ -47,6 +47,26 @@ def test_fifo_order(store: Store) -> None:
     assert second.id == b
 
 
+def test_recover_stale_fails_orphans(store: Store) -> None:
+    # A row claimed but never marked (process died mid-buy) is stuck in_progress.
+    rid = store.enqueue("paper_towels")
+    claimed = store.claim_next_pending()
+    assert claimed is not None and claimed.status == "in_progress"
+
+    recovered = store.recover_stale()
+    assert [r.id for r in recovered] == [rid]
+    assert recovered[0].status == "failed"
+    assert "review" in recovered[0].notes.lower()
+    # Idempotent: nothing left in_progress on a second pass.
+    assert store.recover_stale() == []
+
+
+def test_recover_stale_noop_without_orphans(store: Store) -> None:
+    store.enqueue("paper_towels")  # pending, never claimed
+    assert store.recover_stale() == []
+    assert store.pending_count() == 1
+
+
 def test_spend_since_window(store: Store) -> None:
     rid = store.enqueue("paper_towels")
     store.mark(rid, "placed", order_total=30.0)

@@ -95,6 +95,27 @@ class Engine:
         self.orchestrator = Orchestrator(config, self.store)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._recover_orphans()
+
+    def _recover_orphans(self) -> None:
+        """Fail rows stranded ``in_progress`` by a crash, then pause for review.
+
+        A row left mid-buy may have placed an order, so recovery never
+        auto-retries it (see :meth:`store.Store.recover_stale`). When any are
+        found we pause the worker and tell the operator, who clears them and
+        resumes once they've confirmed whether the order went through.
+        """
+        recovered = self.store.recover_stale()
+        if not recovered:
+            return
+        keys = ", ".join(r.item_key for r in recovered)
+        reason = (
+            f"⚠️ {len(recovered)} order(s) were interrupted by a restart "
+            f"({keys}) — they may have been placed; review, then resume"
+        )
+        self.store.set_paused(True, reason)
+        self.notifier.send(reason)
+        _logger.warning("worker paused: %s", reason)
 
     # ─────────── worker lifecycle ───────────
 
