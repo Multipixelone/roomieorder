@@ -430,10 +430,22 @@ def test_availability_flags_http_404(config: Config) -> None:
     assert reason is not None and "404" in reason
 
 
-def test_availability_flags_out_of_stock_marker(config: Config) -> None:
-    page = _AvailPage(body="This item is currently Out of Stock at your warehouse")
+def test_availability_flags_delivery_out_of_stock_marker(config: Config) -> None:
+    page = _AvailPage(body="Item 123 is out of stock or unavailable to order online")
     reason = _purchaser(config)._check_availability(page, 200)
     assert reason == "is out of stock"
+
+
+def test_availability_ignores_warehouse_pickup_out_of_stock(config: Config) -> None:
+    # Costco's "How To Get It" widget shows per-warehouse pick-up stock
+    # ("<warehouse> Out of Stock" / "Low Stock") even when 2-Day Delivery is
+    # available, so a warehouse-only sold-out body must NOT flag the item — it's
+    # deliverable. With an enabled add-to-cart present, availability passes.
+    page = _AvailPage(
+        body="How To Get It  11201 Out of Stock  Brooklyn Low Stock  2-Day Delivery $24.99",
+        atc=_AvailLocator(count=1, disabled=False),
+    )
+    assert _purchaser(config)._check_availability(page, 200) is None
 
 
 def test_availability_flags_not_found_marker(config: Config) -> None:
@@ -451,6 +463,88 @@ def test_availability_flags_disabled_add_to_cart(config: Config) -> None:
 def test_availability_passes_in_stock_page(config: Config) -> None:
     page = _AvailPage(body="In Stock", atc=_AvailLocator(count=1, disabled=False))
     assert _purchaser(config)._check_availability(page, 200) is None
+
+
+# ─────────── cart reset (start every buy from an empty cart) ───────────
+
+
+class _CartLocator:
+    def __init__(self, page: "_CartPage", selector: str) -> None:
+        self._page = page
+        self._selector = selector
+
+    @property
+    def first(self) -> "_CartLocator":
+        return self
+
+    def _is_remove(self) -> bool:
+        return self._selector in CostcoPurchaser.REMOVE_ITEM_SELECTORS
+
+    def count(self) -> int:
+        # A remove control exists while any line remains; the confirm modal is
+        # never present in this fake (removal is direct).
+        return 1 if (self._is_remove() and self._page.lines > 0) else 0
+
+    def wait_for(self, state: str | None = None, timeout: int | None = None) -> None:
+        raise TimeoutError("confirm modal never visible")
+
+    def click(self, timeout: int | None = None) -> None:
+        if self._is_remove() and self._page.lines > 0:
+            self._page.lines -= 1
+            self._page.removes += 1
+
+
+class _CartPage:
+    """Models the Costco cart for _reset_cart: ``lines`` line items, each remove
+    click drains one. Tracks how many removes fired so the test can assert the
+    cart actually emptied rather than spun."""
+
+    def __init__(self, lines: int) -> None:
+        self.lines = lines
+        self.removes = 0
+        self.url = "https://www.costco.com/CheckoutCartDisplayView"
+
+    def goto(self, url: str, wait_until: str | None = None) -> None:
+        self.url = url
+
+    def wait_for_load_state(self, state: str, timeout: int | None = None) -> None:
+        pass
+
+    def locator(self, selector: str) -> _CartLocator:
+        return _CartLocator(self, selector)
+
+
+def test_reset_cart_drains_every_line(config: Config) -> None:
+    page = _CartPage(lines=3)
+    _purchaser(config)._reset_cart(page)
+    assert page.lines == 0
+    assert page.removes == 3
+
+
+def test_reset_cart_noop_on_empty_cart(config: Config) -> None:
+    page = _CartPage(lines=0)
+    _purchaser(config)._reset_cart(page)
+    assert page.removes == 0
+
+
+def test_reset_cart_is_bounded(config: Config) -> None:
+    # A cart that never drains (e.g. remove silently fails) must stop at the cap,
+    # not loop forever.
+    class _StuckCart(_CartPage):
+        def locator(self, selector: str) -> _CartLocator:
+            loc = _CartLocator(self, selector)
+            self.lines = 5  # remove "fails": the line count never falls
+            return loc
+
+    page = _StuckCart(lines=5)
+    _purchaser(config)._reset_cart(page)
+    assert page.removes <= CostcoPurchaser._MAX_CART_LINES + 1
+
+
+def test_reset_cart_is_base_noop_for_amazon(config: Config) -> None:
+    # Amazon's Buy-Now path doesn't use the shared cart; the base hook does
+    # nothing and must never raise.
+    _amazon(config)._reset_cart(object())
 
 
 # ─────────── Amazon checkout (the fallback flow) ───────────

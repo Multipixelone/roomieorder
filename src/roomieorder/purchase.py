@@ -281,6 +281,14 @@ class BasePurchaser:
         """Reach the place-order review page from the product page."""
         raise NotImplementedError
 
+    def _reset_cart(self, page: object) -> None:
+        """Empty the shared cart before adding this order's item. Base: no-op.
+
+        Costco overrides this (its cart is server-side, shared across every run);
+        Amazon's Buy-Now path doesn't touch the shared cart, so the default is to
+        do nothing."""
+        return None
+
     def is_logged_in(self, page: object) -> bool:
         """Best-effort sign-in check via the store's account nav.
 
@@ -437,6 +445,14 @@ class BasePurchaser:
                 # so the price and checkout run against the authenticated session.
                 if not self.ensure_logged_in(page):
                     return self._signin_required(page, item_key, "product")
+                # Start from an empty cart: a live Place Order checks out the
+                # *entire* cart, and every buy/dry-run only ever *adds* a line
+                # (never clears it), so a stale item left by a prior run would be
+                # ordered alongside this one. Drain it now, before we re-load the
+                # PDP and add our single item. No-op for stores without a shared
+                # cart (base). Best-effort — it navigates away, so reload the PDP
+                # after regardless.
+                self._reset_cart(page)
                 page.goto(url, wait_until="domcontentloaded")
                 if self._is_challenge(page):
                     return self._challenge(page, item_key, "product")
@@ -1109,6 +1125,21 @@ class CostcoPurchaser(BasePurchaser):
         "[automation-id='paymentReviewRadio']",
         "#radio-credit-card-review-ada-handler",
     )
+    # Cart line-item remove control. Verified live 2026-06-17 (CheckoutCartDisplayView):
+    # the cart is the *legacy* WebSphere app (automation-id, not the PDP's
+    # data-testid). Lines are 1-indexed (`removeItemLink_1`, `_2`, …) and
+    # re-index after each removal, so _reset_cart always clicks the first match.
+    REMOVE_ITEM_SELECTORS = (
+        "[automation-id^='removeItemLink_']",
+        "a[automation-id*='removeItem']",
+    )
+    # Primary button of Costco's generic confirm modal (reused site-wide; its
+    # markup sits hidden in the cart DOM until triggered). Cart removal looks to
+    # be a direct AJAX "Remove" with an undo toast — no confirm — but _reset_cart
+    # dismisses this if a remove ever does pop it, gated on visibility so the
+    # always-present hidden markup costs nothing. TODO(costco): confirm live
+    # whether remove pops a modal at all.
+    CART_CONFIRM_SELECTORS = ("[automation-id='confirmationButton']",)
     # Verified against live DOM 2026-06-17 — order-confirmation grand-total.
     ORDER_TOTAL_SELECTORS = (
         "[automation-id='orderTotalOutput']",
@@ -1155,12 +1186,20 @@ class CostcoPurchaser(BasePurchaser):
         "signin.costco.com",
         "sign in or register",
     )
-    # TODO(costco): verify against live DOM — sold-out / not-carried wording.
+    # Verified live 2026-06-17 (toilet_paper dump-dom): the PDP renders a
+    # per-warehouse pick-up availability widget ("How To Get It") that shows
+    # "<warehouse> Out of Stock" / "Low Stock" even when 2-Day Delivery is in
+    # stock, so a bare "out of stock" / "sold out" body scan false-positives on
+    # it and falls a deliverable item back to Amazon. Match only the
+    # delivery/online-order wording, which the warehouse widget never uses: the
+    # widget's own sold-out copy is "…unavailable for pick-up at nearby
+    # warehouses", whereas an item that can't be shipped reads "…unavailable to
+    # order online". The disabled/absent add-to-cart button
+    # (_add_to_cart_disabled) is the structural backstop for the unmessaged case.
     OUT_OF_STOCK_MARKERS = (
-        "out of stock",
-        "sold out",
+        "unavailable to order online",
+        "out of stock or unavailable to order",
         "this item is currently unavailable",
-        "item is not available",
     )
     # TODO(costco): verify against live DOM — not-found page wording.
     NOT_FOUND_MARKERS = (
@@ -1265,6 +1304,8 @@ class CostcoPurchaser(BasePurchaser):
         self._click_by_role(page, ("button", "link"), "checkout")
         self._settle(page)
         if not self._on_checkout(page):
+            # Verified live 2026-06-17: /CheckoutCartView 302s (with a krypto
+            # ticket) to /CheckoutCartDisplayView, the real cart page.
             page.goto(  # type: ignore[attr-defined]
                 f"https://www.{self.domain}/CheckoutCartView",
                 wait_until="domcontentloaded",
@@ -1327,6 +1368,53 @@ class CostcoPurchaser(BasePurchaser):
             except Exception:  # noqa: BLE001 — try the next candidate
                 continue
         return False
+
+    # Hard cap on remove-clicks so a cart that won't drain (selector drift, a
+    # confirm modal we don't dismiss) can't spin the step timeout — far above any
+    # real cart's line count.
+    _MAX_CART_LINES = 30
+
+    def _reset_cart(self, page: object) -> None:
+        """Remove every line from the Costco cart so checkout holds only our item.
+
+        Costco's cart is server-side and shared across every launch of the saved
+        profile, and the buy flow only ever *adds* a line, so without this a
+        stale item from a prior dry-run/failed run rides along into a live Place
+        Order (which checks out the whole cart). Navigate to the cart and click
+        the first remove control until none remain; lines re-index after each
+        removal, so the first match is always valid. Best-effort: any failure
+        leaves the cart untouched and the buy proceeds — this only ever removes,
+        never blocks the order.
+        """
+        try:
+            page.goto(  # type: ignore[attr-defined]
+                f"https://www.{self.domain}/CheckoutCartView",
+                wait_until="domcontentloaded",
+            )
+        except Exception:  # noqa: BLE001 — couldn't reach the cart; skip the reset
+            return
+        self._settle(page)
+        for _ in range(self._MAX_CART_LINES):
+            if not self._click_first(page, self.REMOVE_ITEM_SELECTORS):
+                return  # cart already empty / no remove control → done
+            self._confirm_if_visible(page, self.CART_CONFIRM_SELECTORS)
+            self._settle(page)
+
+    def _confirm_if_visible(self, page: object, selectors: tuple[str, ...]) -> None:
+        """Click a confirm-modal button, but only if it actually renders visible.
+
+        Costco's confirm-modal markup lives hidden in the DOM whether or not a
+        modal is open, so a plain ``count()``/click would block on a never-shown
+        element. Gate on a short visibility wait: present-and-shown → click,
+        present-but-hidden (the common case) → time out fast and move on."""
+        for sel in selectors:
+            try:
+                loc = page.locator(sel).first  # type: ignore[attr-defined]
+                loc.wait_for(state="visible", timeout=1_500)
+                loc.click(timeout=3_000)
+                return
+            except Exception:  # noqa: BLE001 — not shown / not clickable; skip
+                continue
 
 
 class AmazonPurchaser(BasePurchaser):
