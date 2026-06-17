@@ -14,16 +14,17 @@ the worker drains the backlog on wake.
 
 from __future__ import annotations
 
+import hmac
 import logging
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
-from roomieorder.catalog import Catalog, CatalogItem, load_catalog
+from roomieorder.catalog import Catalog, CatalogError, CatalogItem, load_catalog
 from roomieorder.config import Config, load_config
 from roomieorder.guards import check_intake
 from roomieorder.notify import Notifier, build_notifier
@@ -38,7 +39,22 @@ _logger = logging.getLogger(__name__)
 _WORKER_POLL_SECONDS = 5.0
 
 # Outcomes that halt the worker until the operator clears them (PLAN §5).
-_PAUSE_STATUSES = {"challenge", "failed", "spend_capped"}
+# `needs_review` means an order may have been placed but couldn't be confirmed —
+# halt so a human checks before anything re-orders the item.
+_PAUSE_STATUSES = {"challenge", "failed", "spend_capped", "needs_review"}
+
+
+def _require_token(config: Config, provided: Optional[str]) -> None:
+    """Reject the request when an intake token is configured and doesn't match.
+
+    No-op when ``config.intake_token`` is empty (the loopback-only default), so
+    local dev isn't burdened. Compared in constant time to avoid leaking the
+    secret through response timing."""
+    expected = config.intake_token
+    if not expected:
+        return
+    if provided is None or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="invalid or missing intake token")
 
 
 def _product_id(item: CatalogItem, provider: str) -> str:
@@ -95,6 +111,27 @@ class Engine:
         self.orchestrator = Orchestrator(config, self.store)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._recover_orphans()
+
+    def _recover_orphans(self) -> None:
+        """Fail rows stranded ``in_progress`` by a crash, then pause for review.
+
+        A row left mid-buy may have placed an order, so recovery never
+        auto-retries it (see :meth:`store.Store.recover_stale`). When any are
+        found we pause the worker and tell the operator, who clears them and
+        resumes once they've confirmed whether the order went through.
+        """
+        recovered = self.store.recover_stale()
+        if not recovered:
+            return
+        keys = ", ".join(r.item_key for r in recovered)
+        reason = (
+            f"⚠️ {len(recovered)} order(s) were interrupted by a restart "
+            f"({keys}) — they may have been placed; review, then resume"
+        )
+        self.store.set_paused(True, reason)
+        self.notifier.send(reason)
+        _logger.warning("worker paused: %s", reason)
 
     # ─────────── worker lifecycle ───────────
 
@@ -151,6 +188,39 @@ class Engine:
         if result.status in _PAUSE_STATUSES:
             self.store.set_paused(True, result.message)
             _logger.warning("worker paused: %s", result.message)
+        elif result.status == "placed":
+            self._enforce_recorded_cap()
+
+    def _enforce_recorded_cap(self) -> None:
+        """Backstop the spend cap against *recorded* totals after a placed order.
+
+        The pre-buy guard checks ``live_price * qty``, but tax/shipping/fees only
+        land once the order total is scraped, so a run of orders can creep over
+        ``daily_cap`` in real money. Re-check the recorded trailing-24h spend and
+        pause before the next buy when it's actually breached. Can't unwind the
+        order just placed — it stops the *next* one."""
+        spent = self.store.spend_since(24.0)
+        if spent <= self.config.daily_cap:
+            return
+        reason = (
+            f"⛔ recorded 24h spend ${spent:.2f} is over the ${self.config.daily_cap:.2f} "
+            "cap once real totals landed — pausing before the next order"
+        )
+        self.store.set_paused(True, reason)
+        self.notifier.send(reason)
+        _logger.warning("worker paused: %s", reason)
+
+    def reload_catalog(self) -> list[str]:
+        """Re-read the catalog from disk so edits land without a service restart.
+
+        The catalog is otherwise captured once at boot. Swaps ``self.catalog``
+        only on a clean parse, so a malformed edit raises (surfaced as a 400 by
+        the endpoint) and leaves the running catalog untouched. Returns the new
+        item keys."""
+        new_catalog = load_catalog(self.config.catalog_path)
+        self.catalog = new_catalog
+        _logger.info("catalog reloaded: %d items", len(new_catalog))
+        return sorted(new_catalog)
 
     # ─────────── dashboard state ───────────
 
@@ -158,15 +228,16 @@ class Engine:
         """Per-item cooldown snapshot for the HA dashboard (`GET /items`).
 
         Mirrors the cooldown arm of :func:`guards.check_intake` — keep the two
-        in sync. Catalog is tiny, so a couple of indexed lookups per item is
-        cheap enough to compute on every poll. Only *placed* orders arm the
+        in sync. One grouped query fetches every item's last-placed time, so the
+        poll cost is flat in the catalog size. Only *placed* orders arm the
         cooldown, so nothing grays out while ``dry_run`` is on (PLAN §4).
         """
         current = now or datetime.now(timezone.utc)
+        placed_at = self.store.last_placed_at_all()
         out: dict[str, ItemStatus] = {}
         for key in sorted(self.catalog):
             item = self.catalog[key]
-            last_placed = self.store.last_placed_at(key)
+            last_placed = placed_at.get(key)
             cooldown_until: Optional[datetime] = None
             on_cooldown = False
             if last_placed is not None and item.cooldown_days > 0:
@@ -244,8 +315,12 @@ def create_app(config: Optional[Config] = None) -> FastAPI:
         return [r.model_dump(mode="json") for r in engine.store.list_queue(limit)]
 
     @app.post("/reorder")
-    def reorder(req: ReorderRequest) -> dict[str, object]:
+    def reorder(
+        req: ReorderRequest,
+        x_roomieorder_token: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
         engine: Engine = app.state.engine
+        _require_token(engine.config, x_roomieorder_token)
         item = engine.catalog.get(req.item_key)
         if item is None:
             raise HTTPException(status_code=404, detail=f"unknown item_key: {req.item_key}")
@@ -263,5 +338,18 @@ def create_app(config: Optional[Config] = None) -> FastAPI:
 
         row_id = engine.store.enqueue(req.item_key, req.requester)
         return {"accepted": True, "row_id": row_id, "item_key": req.item_key}
+
+    @app.post("/reload")
+    def reload(
+        x_roomieorder_token: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        engine: Engine = app.state.engine
+        _require_token(engine.config, x_roomieorder_token)
+        try:
+            items = engine.reload_catalog()
+        except CatalogError as exc:
+            # Bad edit — the running catalog is untouched; report and keep serving.
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"reloaded": True, "items": items}
 
     return app

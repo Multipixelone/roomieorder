@@ -1,5 +1,11 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Dependency-update lanes are split so Renovate and the flake-update workflow don't both touch the lockfile:",
+    "Renovate owns pyproject.toml deps and GitHub Action digests;",
+    ".github/workflows/flake-update.yml owns flake.lock.",
+    "The nix manager is disabled below so Renovate never opens a flake.lock PR."
+  ],
   "extends": [
     "config:recommended",
     "helpers:pinGitHubActionDigests"
@@ -9,5 +15,8 @@
   "automergeStrategy": "squash",
   "platformAutomerge": true,
   "semanticCommits": "enabled",
-  "prConcurrentLimit": 5
+  "prConcurrentLimit": 5,
+  "nix": {
+    "enabled": false
+  }
 }

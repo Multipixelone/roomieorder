@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -28,9 +29,12 @@ class FakeOrchestrator:
 
     def buy(self, item_key: str, item: CatalogItem):  # type: ignore[no-untyped-def]
         price = item.costco.expected_price if item.costco else item.amazon.expected_price  # type: ignore[union-attr]
+        # A placed order records a real order_total (what the cap backstop reads).
+        order_total = price * item.qty if self.result_status == "placed" else None
         return PurchaseResult(
             status=self.result_status,
             unit_price=price,
+            order_total=order_total,
             provider="costco",
             message=f"[fake] {self.result_status} {item_key}",
         )
@@ -107,6 +111,107 @@ def test_items_reports_cooldown(client: TestClient) -> None:
     rid2 = engine.store.enqueue("dish_soap")
     engine.store.mark(rid2, "placed", order_total=11.99)
     assert client.get("/items").json()["dish_soap"]["on_cooldown"] is False
+
+
+def test_reorder_requires_token_when_configured(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
+    monkeypatch.setattr("roomieorder.main.Orchestrator", FakeOrchestrator)
+    secured = config.model_copy(update={"intake_token": "s3cret"})
+    from roomieorder.main import create_app
+
+    with TestClient(create_app(secured)) as c:
+        # No header → rejected; wrong header → rejected; right header → accepted.
+        assert c.post("/reorder", json={"item_key": "paper_towels"}).status_code == 401
+        bad = c.post(
+            "/reorder", json={"item_key": "paper_towels"}, headers={"X-Roomieorder-Token": "nope"}
+        )
+        assert bad.status_code == 401
+        ok = c.post(
+            "/reorder",
+            json={"item_key": "paper_towels"},
+            headers={"X-Roomieorder-Token": "s3cret"},
+        )
+        assert ok.status_code == 200 and ok.json()["accepted"] is True
+
+
+def test_reorder_open_when_no_token(client: TestClient) -> None:
+    # Default config has no token → no header needed (loopback dev case).
+    r = client.post("/reorder", json={"item_key": "paper_towels"})
+    assert r.status_code == 200
+
+
+def test_startup_recovers_orphaned_in_progress(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Simulate a crash: a row left in_progress in the DB before the app boots.
+    monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
+    monkeypatch.setattr("roomieorder.main.Orchestrator", FakeOrchestrator)
+    pre = Store(config.db_path)
+    pre.init_db()
+    rid = pre.enqueue("paper_towels")
+    pre.claim_next_pending()  # in_progress, never marked
+    pre.close()
+
+    from roomieorder.main import create_app
+
+    app = create_app(config)
+    with TestClient(app) as c:
+        # Startup recovery fails the orphan and pauses for review.
+        assert c.get("/health").json()["paused"] is True
+        rows = c.get("/queue").json()
+        orphan = next(r for r in rows if r["id"] == rid)
+        assert orphan["status"] == "failed"
+
+
+def test_reload_picks_up_catalog_edits(client: TestClient, catalog_path: Path) -> None:
+    import json
+
+    before = client.get("/health").json()["items"]
+    assert "cocoa" not in before
+
+    data = json.loads(catalog_path.read_text())
+    data["cocoa"] = {
+        "title": "Hot Cocoa",
+        "qty": 1,
+        "cooldown_days": 0,
+        "costco": {"item_number": "9999999", "expected_price": 8.0, "price_ceiling": 12.0},
+    }
+    catalog_path.write_text(json.dumps(data))
+
+    r = client.post("/reload")
+    assert r.status_code == 200
+    assert "cocoa" in r.json()["items"]
+    assert "cocoa" in client.get("/health").json()["items"]
+
+
+def test_reload_rejects_bad_catalog(client: TestClient, catalog_path: Path) -> None:
+    catalog_path.write_text("{ not valid json")
+    r = client.post("/reload")
+    assert r.status_code == 400
+    # The running catalog is untouched — the bad edit didn't take.
+    assert "paper_towels" in client.get("/health").json()["items"]
+
+
+def test_worker_pauses_when_recorded_spend_breaches_cap(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
+    monkeypatch.setattr("roomieorder.main.Orchestrator", FakeOrchestrator)
+    # paper_towels Costco price 24.99 → a $20 cap is breached by the real total.
+    capped = config.model_copy(update={"dry_run": False, "daily_cap": 20.0})
+    FakeOrchestrator.result_status = "placed"
+    try:
+        from roomieorder.main import create_app
+
+        with TestClient(create_app(capped)) as c:
+            c.post("/reorder", json={"item_key": "paper_towels"})
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not c.get("/health").json()["paused"]:
+                time.sleep(0.05)
+            assert c.get("/health").json()["paused"] is True
+            assert "cap" in c.get("/health").json()["pause_reason"]
+    finally:
+        FakeOrchestrator.result_status = "dry_run"
 
 
 def test_worker_pauses_on_challenge(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:

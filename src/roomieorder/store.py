@@ -10,6 +10,7 @@ of truth and no cross-table drift.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
@@ -31,11 +32,21 @@ Status = Literal[
     # leg this triggers the Amazon fallback; on the last provider it's terminal.
     "unavailable",
     "failed",
+    # Place Order was clicked but the confirmation couldn't be read, so the order
+    # *may* have gone through. Never auto-retried (that risks a double order) —
+    # the worker pauses and a human confirms against the store account.
+    "needs_review",
     "challenge",
 ]
 
 # Statuses that represent a real, completed money movement for spend accounting.
 SPEND_STATUSES = ("placed",)
+
+# How many times a row may be claimed before it's treated as exhausted. The buy
+# is a money-moving step that may have *already placed* an order when it died, so
+# the safe policy is one attempt: never auto-retry a row that reached the worker,
+# hand it to the operator instead (see ``recover_stale`` and ``claim_next_pending``).
+MAX_ATTEMPTS = 1
 
 
 def _utcnow() -> datetime:
@@ -95,16 +106,21 @@ CREATE TABLE IF NOT EXISTS worker_state (
 class Store:
     """Thin synchronous wrapper around the SQLite state file.
 
-    One connection per Store instance; the worker and the (async) intake both
-    run in the same process, so a single connection with the default
-    serialized threading is sufficient. SQLite handles the concurrency.
+    One connection per Store instance, shared by the worker thread and uvicorn's
+    (async) intake threadpool. ``sqlite3`` serialises individual statements, but
+    ``commit()`` is connection-global — one thread's commit flushes another
+    thread's half-finished write — so every method runs under ``self._lock``.
+    That serialises whole operations, making a method's commit atomic relative to
+    the other threads and keeping any future multi-statement transaction safe.
     """
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
         # check_same_thread=False: uvicorn's threadpool may touch the same
-        # connection. SQLite is serialized by default, so this is safe here.
+        # connection. The reentrant lock below — not SQLite's per-statement
+        # serialisation — is what gives commit isolation between the threads.
+        self._lock = threading.RLock()
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -113,9 +129,10 @@ class Store:
     # ─────────── schema ───────────
 
     def init_db(self) -> None:
-        self._conn.executescript(_SCHEMA)
-        self._migrate()
-        self._conn.commit()
+        with self._lock:
+            self._conn.executescript(_SCHEMA)
+            self._migrate()
+            self._conn.commit()
 
     def _migrate(self) -> None:
         """Bring an existing DB up to the current schema, idempotently.
@@ -132,42 +149,91 @@ class Store:
             )
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     # ─────────── enqueue / drain ───────────
 
     def enqueue(self, item_key: str, requester: str = "household") -> int:
         now = _iso(_utcnow())
-        cur = self._conn.execute(
-            "INSERT INTO queue (item_key, requester, status, created_at, updated_at) "
-            "VALUES (?, ?, 'pending', ?, ?)",
-            (item_key, requester, now, now),
-        )
-        self._conn.commit()
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO queue (item_key, requester, status, created_at, updated_at) "
+                "VALUES (?, ?, 'pending', ?, ?)",
+                (item_key, requester, now, now),
+            )
+            self._conn.commit()
         assert cur.lastrowid is not None
         return cur.lastrowid
 
     def claim_next_pending(self) -> Optional[QueueRow]:
         """Atomically take the oldest pending row, flipping it to in_progress.
 
-        Returns None when the queue is empty. The UPDATE…RETURNING is a single
-        statement so two workers (or a restart mid-drain) can't claim the same
-        row twice.
+        Returns None when the queue is empty (or every pending row has already
+        exhausted ``MAX_ATTEMPTS``). The UPDATE…RETURNING is a single statement so
+        two workers (or a restart mid-drain) can't claim the same row twice. The
+        ``attempts < MAX_ATTEMPTS`` guard enforces the retry cap: a row that's
+        been claimed up to the cap is left for ``recover_stale`` to fail rather
+        than re-run a possibly-placed order.
         """
-        cur = self._conn.execute(
-            """
-            UPDATE queue SET status='in_progress', updated_at=?, attempts=attempts+1
-            WHERE id = (
-                SELECT id FROM queue WHERE status='pending'
-                ORDER BY created_at ASC LIMIT 1
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE queue SET status='in_progress', updated_at=?, attempts=attempts+1
+                WHERE id = (
+                    SELECT id FROM queue WHERE status='pending' AND attempts < ?
+                    ORDER BY created_at ASC LIMIT 1
+                )
+                RETURNING *
+                """,
+                (_iso(_utcnow()), MAX_ATTEMPTS),
             )
-            RETURNING *
-            """,
-            (_iso(_utcnow()),),
-        )
-        row = cur.fetchone()
-        self._conn.commit()
+            row = cur.fetchone()
+            self._conn.commit()
         return self._to_row(row) if row else None
+
+    def recover_stale(self) -> list[QueueRow]:
+        """Resolve rows left ``in_progress`` by a hard restart.
+
+        ``claim_next_pending`` only ever selects ``pending`` rows, so a process
+        death (SIGKILL, OOM, power loss, a systemd restart) between the claim and
+        the terminal ``mark`` strands the row ``in_progress`` forever — never
+        re-claimed, never failed, never surfaced. Run once at startup: a row that
+        already reached ``MAX_ATTEMPTS`` becomes ``failed`` (it reached the buy
+        and may have *placed* an order — a human must check, never auto-retry);
+        one still under the cap goes back to ``pending`` for another drain.
+
+        Returns the rows that were *failed* (the ones needing review), so the
+        caller can pause the worker and notify the operator. Idempotent: a second
+        call finds no ``in_progress`` rows and returns an empty list.
+        """
+        note = "recovered: stuck in_progress after a restart — may have been placed, needs review"
+        with self._lock:
+            stale = self._conn.execute(
+                "SELECT id, attempts FROM queue WHERE status='in_progress'"
+            ).fetchall()
+            now = _iso(_utcnow())
+            failed_ids: list[int] = []
+            for r in stale:
+                if r["attempts"] >= MAX_ATTEMPTS:
+                    self._conn.execute(
+                        "UPDATE queue SET status='failed', updated_at=?, notes=? WHERE id=?",
+                        (now, note, r["id"]),
+                    )
+                    failed_ids.append(r["id"])
+                else:
+                    self._conn.execute(
+                        "UPDATE queue SET status='pending', updated_at=? WHERE id=?",
+                        (now, r["id"]),
+                    )
+            self._conn.commit()
+            if not failed_ids:
+                return []
+            placeholders = ",".join("?" for _ in failed_ids)
+            rows = self._conn.execute(
+                f"SELECT * FROM queue WHERE id IN ({placeholders}) ORDER BY id", failed_ids
+            ).fetchall()
+        return [self._to_row(r) for r in rows]
 
     def mark(
         self,
@@ -198,77 +264,99 @@ class Store:
                 sets.append(f"{col}=?")
                 args.append(val)
         args.append(row_id)
-        self._conn.execute(f"UPDATE queue SET {', '.join(sets)} WHERE id=?", args)
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(f"UPDATE queue SET {', '.join(sets)} WHERE id=?", args)
+            self._conn.commit()
 
     # ─────────── guard queries ───────────
 
     def last_request_at(self, item_key: str) -> Optional[datetime]:
         """Most recent *enqueue* time for an item_key (debounce check)."""
-        row = self._conn.execute(
-            "SELECT created_at FROM queue WHERE item_key=? ORDER BY created_at DESC LIMIT 1",
-            (item_key,),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT created_at FROM queue WHERE item_key=? ORDER BY created_at DESC LIMIT 1",
+                (item_key,),
+            ).fetchone()
         return _parse(row["created_at"]) if row else None
 
     def last_placed_at(self, item_key: str) -> Optional[datetime]:
         """Most recent successfully *placed* order time (cooldown check)."""
-        row = self._conn.execute(
-            "SELECT updated_at FROM queue WHERE item_key=? AND status='placed' "
-            "ORDER BY updated_at DESC LIMIT 1",
-            (item_key,),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT updated_at FROM queue WHERE item_key=? AND status='placed' "
+                "ORDER BY updated_at DESC LIMIT 1",
+                (item_key,),
+            ).fetchone()
         return _parse(row["updated_at"]) if row else None
+
+    def last_placed_at_all(self) -> dict[str, datetime]:
+        """Most recent *placed* time for every item_key, in a single query.
+
+        The dashboard poll (`GET /items`) needs the cooldown clock for the whole
+        catalog at once; this grouped read replaces one ``last_placed_at`` query
+        per item. Item keys with no placed order simply don't appear in the map."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT item_key, MAX(updated_at) AS ts FROM queue "
+                "WHERE status='placed' GROUP BY item_key"
+            ).fetchall()
+        return {r["item_key"]: _parse(r["ts"]) for r in rows}
 
     def spend_since(self, hours: float = 24.0) -> float:
         """Sum of order_total for placed orders in the trailing window."""
         cutoff = _iso(_utcnow() - timedelta(hours=hours))
         placeholders = ",".join("?" for _ in SPEND_STATUSES)
-        row = self._conn.execute(
-            f"SELECT COALESCE(SUM(order_total), 0.0) AS total FROM queue "
-            f"WHERE status IN ({placeholders}) AND updated_at >= ? "
-            f"AND order_total IS NOT NULL",
-            (*SPEND_STATUSES, cutoff),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT COALESCE(SUM(order_total), 0.0) AS total FROM queue "
+                f"WHERE status IN ({placeholders}) AND updated_at >= ? "
+                f"AND order_total IS NOT NULL",
+                (*SPEND_STATUSES, cutoff),
+            ).fetchone()
         return float(row["total"])
 
     def list_queue(self, limit: int = 20) -> list[QueueRow]:
-        rows = self._conn.execute(
-            "SELECT * FROM queue ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM queue ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
         return [self._to_row(r) for r in rows]
 
     def pending_count(self) -> int:
-        row = self._conn.execute(
-            "SELECT COUNT(*) AS n FROM queue WHERE status='pending'"
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM queue WHERE status='pending'"
+            ).fetchone()
         return int(row["n"])
 
     # ─────────── worker pause ───────────
 
     def set_paused(self, paused: bool, reason: str = "") -> None:
-        self._conn.execute(
-            "INSERT INTO worker_state (key, value) VALUES ('paused', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            ("1" if paused else "0",),
-        )
-        self._conn.execute(
-            "INSERT INTO worker_state (key, value) VALUES ('pause_reason', ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (reason,),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO worker_state (key, value) VALUES ('paused', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                ("1" if paused else "0",),
+            )
+            self._conn.execute(
+                "INSERT INTO worker_state (key, value) VALUES ('pause_reason', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (reason,),
+            )
+            self._conn.commit()
 
     def is_paused(self) -> bool:
-        row = self._conn.execute(
-            "SELECT value FROM worker_state WHERE key='paused'"
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM worker_state WHERE key='paused'"
+            ).fetchone()
         return bool(row and row["value"] == "1")
 
     def pause_reason(self) -> str:
-        row = self._conn.execute(
-            "SELECT value FROM worker_state WHERE key='pause_reason'"
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM worker_state WHERE key='pause_reason'"
+            ).fetchone()
         return row["value"] if row else ""
 
     # ─────────── internals ───────────

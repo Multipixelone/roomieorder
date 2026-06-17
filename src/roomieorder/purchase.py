@@ -80,6 +80,18 @@ def _playwright_api() -> object:
 # or a challenge, not slowness.
 _STEP_TIMEOUT_MS = 20_000
 
+# Exception types that mean "this is our bug", not "the store flaked". These
+# propagate out of `buy` instead of being laundered into a `failed` result, so a
+# code defect surfaces (and pauses the worker via the loop's handler) rather than
+# masquerading as a sold-out item with a one-line screenshot.
+_BUG_EXCEPTIONS = (
+    AttributeError,
+    TypeError,
+    NameError,
+    ImportError,
+    NotImplementedError,
+)
+
 _JSONLD_SELECTOR = "script[type='application/ld+json']"
 
 # First number-ish run in a blob: digits with optional grouping/decimal
@@ -125,9 +137,13 @@ def parse_price(text: str) -> Optional[float]:
     """Pull the first currency value out of a price blob, or None.
 
     Handles both US grouping (``$1,234.56``) and European decimal-comma
-    (``€11,99``) by treating the *last* ``.``/``,`` as the decimal point and
-    dropping every other separator as grouping. Both stores show cents, so the
-    trailing group is the fraction.
+    (``€11,99``) by treating the *last* ``.``/``,`` as the decimal point — but
+    only when it actually looks like a fraction. A trailing separator followed by
+    exactly three digits (``$1,234``, ``$1,000``) is a *thousands group*, not
+    cents: reading it as a decimal turns ``$1,000`` into ``1.0`` and sails the
+    item under every price ceiling, which is the dangerous direction. So we only
+    split on the last separator when its trailing run is 1, 2, or 4+ digits (real
+    fractions); a lone 3-digit tail is grouping and the whole number is integral.
 
     Costco's React PDP splits the price across separate ``<span>``s — whole,
     dot, decimal — so the element's ``inner_text`` comes back as ``"$ 27 . 39"``
@@ -140,12 +156,14 @@ def parse_price(text: str) -> Optional[float]:
         return None
     num = m.group(0)
     last_sep = max(num.rfind("."), num.rfind(","))
-    if last_sep == -1:
-        whole = num
+    tail = num[last_sep + 1 :] if last_sep != -1 else ""
+    # A 3-digit tail is a thousands group, not cents → no decimal split.
+    if last_sep == -1 or len(tail) == 3:
+        whole = re.sub(r"[.,]", "", num)
         frac = ""
     else:
         whole = re.sub(r"[.,]", "", num[:last_sep])
-        frac = num[last_sep + 1 :]
+        frac = tail
     try:
         return float(f"{whole}.{frac}") if frac else float(whole)
     except ValueError:
@@ -236,6 +254,12 @@ class BasePurchaser:
     OUT_OF_STOCK_MARKERS: tuple[str, ...] = ()
     NOT_FOUND_MARKERS: tuple[str, ...] = ()
     ORDER_ID_RE = re.compile(r"\b\d{9,12}\b")
+    # Label-anchored order-id capture, tried *before* the bare ORDER_ID_RE so a
+    # phone number / item number / ZIP+4 elsewhere on the confirmation page can't
+    # be mistaken for the order id (capture group 1 is the id). None when the
+    # store's bare ORDER_ID_RE is already specific enough (e.g. Amazon's dashed
+    # format) to stand on its own.
+    ORDER_ID_LABEL_RE: Optional["re.Pattern[str]"] = None
 
     def __init__(self, config: Config, *, profile_dir: Path, domain: str) -> None:
         self.config = config
@@ -385,6 +409,11 @@ class BasePurchaser:
                 page.bring_to_front()
             except Exception:  # noqa: BLE001 — purely an optimisation
                 pass
+            # Flips True the instant Place Order is clicked — the point of no
+            # return. Past it, *no* failure path may report `failed` (which would
+            # invite a re-order of an order that may have gone through); they all
+            # route to `needs_review` for a human to confirm.
+            submitted = False
             try:
                 resp = page.goto(url, wait_until="domcontentloaded")
                 http_status = getattr(resp, "status", None) if resp is not None else None
@@ -507,6 +536,9 @@ class BasePurchaser:
                         ),
                         screenshot=shot,
                     )
+                # The click landed: from here a scrape miss / timeout / crash
+                # must not read as `failed`.
+                submitted = True
 
                 page.wait_for_load_state("domcontentloaded")
                 if self._is_signin(page):
@@ -516,6 +548,12 @@ class BasePurchaser:
 
                 self._settle(page)
                 order_id, total = self._scrape_confirmation(page)
+                if order_id is None and total is None:
+                    # Submitted, but nothing confirmable scraped — don't claim a
+                    # clean `placed` we can't evidence. Flag for human review.
+                    return self._submitted_unconfirmed(
+                        page, item_key, "no order number or total on the confirmation page"
+                    )
                 self._screenshot(page, item_key, "confirmation")
                 return PurchaseResult(
                     status="placed",
@@ -529,20 +567,25 @@ class BasePurchaser:
                 )
 
             except PWTimeout as exc:
+                detail = f"timed out: {exc}".split("\n")[0]
+                if submitted:
+                    return self._submitted_unconfirmed(page, item_key, detail)
                 shot = self._screenshot(page, item_key, "timeout")
-                return PurchaseResult(
-                    status="failed",
-                    message=f"timed out: {exc}".split("\n")[0],
-                    screenshot=shot,
-                )
+                return PurchaseResult(status="failed", message=detail, screenshot=shot)
+            except _BUG_EXCEPTIONS:
+                # A programmer error (bad attr/type/name, missing override, …).
+                # Screenshot for context, then re-raise so it can't hide as
+                # "store flakiness" — the worker loop records it and pauses.
+                _logger.exception("buy flow hit a programmer error for %s", item_key)
+                self._screenshot(page, item_key, "crash")
+                raise
             except Exception as exc:  # noqa: BLE001 — convert any flake to a safe result
                 _logger.exception("buy flow crashed for %s", item_key)
+                detail = f"buy flow error: {exc}".split("\n")[0]
+                if submitted:
+                    return self._submitted_unconfirmed(page, item_key, detail)
                 shot = self._screenshot(page, item_key, "crash")
-                return PurchaseResult(
-                    status="failed",
-                    message=f"buy flow error: {exc}".split("\n")[0],
-                    screenshot=shot,
-                )
+                return PurchaseResult(status="failed", message=detail, screenshot=shot)
             finally:
                 context.close()
 
@@ -813,22 +856,27 @@ class BasePurchaser:
         ids alone could read as "couldn't find Place Order" even when the button
         is right there. The visible text is the most stable handle, so wait on
         the role-named button first and click it promptly — before the checkout
-        session goes stale — then fall back to the ids and a looser text match."""
+        session goes stale — then fall back to the ids and a clickable-role text
+        match. The last resort stays on *clickable roles* (button/link) rather
+        than a bare ``get_by_text``, which would happily click a heading or label
+        that merely contains "Place Order" and isn't the submit control."""
         name_re = re.compile(r"place (your )?order", re.I)
         btn = page.get_by_role("button", name=name_re)  # type: ignore[attr-defined]
         try:
             btn.first.wait_for(state="visible", timeout=_STEP_TIMEOUT_MS)
             btn.first.click(timeout=5_000)
             return True
-        except Exception:  # noqa: BLE001 — fall through to the id/text fallbacks
+        except Exception:  # noqa: BLE001 — fall through to the id/role fallbacks
             pass
         if self._click_first(page, self.PLACE_ORDER_SELECTORS):
             return True
-        try:
-            page.get_by_text(name_re).first.click(timeout=5_000)  # type: ignore[attr-defined]
-            return True
-        except Exception:  # noqa: BLE001 — no match anywhere; caller fails
-            return False
+        for role in ("button", "link"):
+            try:
+                page.get_by_role(role, name=name_re).first.click(timeout=5_000)  # type: ignore[attr-defined]
+                return True
+            except Exception:  # noqa: BLE001 — try the next clickable role
+                continue
+        return False
 
     def _page_debug(self, page: object) -> str:
         """A short 'url · title' tag for failure messages, so the operator can
@@ -872,16 +920,42 @@ class BasePurchaser:
                 continue
         return False
 
+    def _submitted_unconfirmed(
+        self, page: object, item_key: str, detail: str
+    ) -> PurchaseResult:
+        """Place Order was clicked but we couldn't confirm the result.
+
+        The order *may* have gone through, so this never reports ``failed`` (which
+        the worker could re-drive into a double order). It returns ``needs_review``
+        — a pausing, non-fallback status — so a human checks the store account
+        before anything re-orders the item."""
+        shot = self._screenshot(page, item_key, "submitted_unconfirmed")
+        return PurchaseResult(
+            status="needs_review",
+            message=(
+                f"⚠️ {self.STORE_NAME}: Place Order was clicked but the confirmation "
+                f"couldn't be read — the order MAY have been placed. Check the "
+                f"{self.STORE_NAME} account before re-ordering ({detail})"
+            ),
+            screenshot=shot,
+        )
+
     def _scrape_confirmation(self, page: object) -> tuple[Optional[str], Optional[float]]:
+        # Defensive read: the confirmation body can paint a beat after the order
+        # POST returns, so a single read can miss it. Retry a few times before
+        # giving up — a missed scrape here is what makes a placed order look
+        # unconfirmed (see _submitted_unconfirmed).
         body = ""
-        try:
-            body = page.locator("body").inner_text(timeout=5_000)  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001
-            pass
-        order_id = None
-        m = self.ORDER_ID_RE.search(body)
-        if m:
-            order_id = m.group(0)
+        for attempt in range(3):
+            try:
+                body = page.locator("body").inner_text(timeout=5_000)  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                body = ""
+            if self._find_order_id(body) is not None:
+                break
+            if attempt < 2:
+                self._settle(page)
+        order_id = self._find_order_id(body)
         total = None
         for sel in self.ORDER_TOTAL_SELECTORS:
             try:
@@ -894,6 +968,20 @@ class BasePurchaser:
             except Exception:  # noqa: BLE001
                 continue
         return order_id, total
+
+    def _find_order_id(self, body: str) -> Optional[str]:
+        """Extract the order id from the confirmation body text.
+
+        Prefer the label-anchored ``ORDER_ID_LABEL_RE`` (capture group 1) so a
+        bare digit run elsewhere — a phone number, item number, ZIP+4, a
+        timestamp — can't be mistaken for the order id. Fall back to the store's
+        ``ORDER_ID_RE`` only when no label match is found (or none is defined)."""
+        if self.ORDER_ID_LABEL_RE is not None:
+            m = self.ORDER_ID_LABEL_RE.search(body)
+            if m:
+                return m.group(1)
+        m = self.ORDER_ID_RE.search(body)
+        return m.group(0) if m else None
 
     def _settle(self, page: object) -> None:
         """Let a freshly-navigated page paint before we shoot it.
@@ -1063,9 +1151,17 @@ class CostcoPurchaser(BasePurchaser):
         "page not found",
         "the page you requested cannot be found",
     )
-    # Costco web order numbers — best guess (purely digits, ~10).
-    # TODO(costco): verify against live DOM — confirm order-number format.
+    # Costco web order numbers — best guess (purely digits, ~10). Because a bare
+    # digit run on the confirmation page is ambiguous (phone numbers, item
+    # numbers, ZIP+4 all match), prefer the label-anchored capture below and only
+    # fall back to this when no "Order #"/"Confirmation number" label is found.
+    # TODO(costco): verify against live DOM — confirm order-number format + label.
     ORDER_ID_RE = re.compile(r"\b\d{9,12}\b")
+    # "Order #12345678", "Order Number: 12345678", "Confirmation # 12345678", …
+    ORDER_ID_LABEL_RE = re.compile(
+        r"(?:order|confirmation)\s*(?:number|no\.?|#)?\s*[:#]?\s*(\d{7,12})",
+        re.I,
+    )
 
     def _resolve_url(self, source: object) -> str:
         url = getattr(source, "url", "") or ""

@@ -27,6 +27,16 @@ def test_claim_empty_returns_none(store: Store) -> None:
     assert store.claim_next_pending() is None
 
 
+def test_claim_respects_attempts_cap(store: Store) -> None:
+    # A row that's already been claimed up to MAX_ATTEMPTS (1) and bounced back
+    # to pending must not be re-claimed — it's left for recovery to fail.
+    rid = store.enqueue("paper_towels")
+    first = store.claim_next_pending()
+    assert first is not None and first.attempts == 1
+    store.mark(rid, "pending")  # simulate a requeue
+    assert store.claim_next_pending() is None
+
+
 def test_fifo_order(store: Store) -> None:
     a = store.enqueue("paper_towels")
     b = store.enqueue("dish_soap")
@@ -35,6 +45,26 @@ def test_fifo_order(store: Store) -> None:
     assert first is not None and second is not None
     assert first.id == a
     assert second.id == b
+
+
+def test_recover_stale_fails_orphans(store: Store) -> None:
+    # A row claimed but never marked (process died mid-buy) is stuck in_progress.
+    rid = store.enqueue("paper_towels")
+    claimed = store.claim_next_pending()
+    assert claimed is not None and claimed.status == "in_progress"
+
+    recovered = store.recover_stale()
+    assert [r.id for r in recovered] == [rid]
+    assert recovered[0].status == "failed"
+    assert "review" in recovered[0].notes.lower()
+    # Idempotent: nothing left in_progress on a second pass.
+    assert store.recover_stale() == []
+
+
+def test_recover_stale_noop_without_orphans(store: Store) -> None:
+    store.enqueue("paper_towels")  # pending, never claimed
+    assert store.recover_stale() == []
+    assert store.pending_count() == 1
 
 
 def test_spend_since_window(store: Store) -> None:
@@ -60,6 +90,17 @@ def test_last_placed_at(store: Store) -> None:
     assert store.last_placed_at("paper_towels") is not None
     # A non-placed row doesn't set the cooldown clock.
     assert store.last_placed_at("dish_soap") is None
+
+
+def test_last_placed_at_all_groups_by_item(store: Store) -> None:
+    assert store.last_placed_at_all() == {}
+    a = store.enqueue("paper_towels")
+    store.mark(a, "placed", order_total=10.0)
+    b = store.enqueue("dish_soap")
+    store.mark(b, "failed")  # non-placed → absent from the map
+    grouped = store.last_placed_at_all()
+    assert set(grouped) == {"paper_towels"}
+    assert grouped["paper_towels"] == store.last_placed_at("paper_towels")
 
 
 def test_pause_roundtrip(store: Store) -> None:
