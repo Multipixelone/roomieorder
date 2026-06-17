@@ -121,6 +121,13 @@ that could click something benign — or could click into a confirm flow unexpec
 **Fix direction:** restrict the text fallback to clickable roles, or drop it in favour of
 the role-named button + verified CSS ids once the live DOM is known.
 
+✅ **Resolved 2026-06-17:** the last-resort fallback already iterates *clickable roles*
+(`button`/`link`) rather than a bare `get_by_text` (see the `_place_order` docstring), so
+it can no longer click a heading/label — and the place-order button is now live-verified:
+`#place-order-button-regular` is the first `PLACE_ORDER_SELECTORS` entry (the old
+`[automation-id='placeOrderButton']` guess was count=0). (The `:844` line ref above is
+stale; `_place_order` is now ~`:868`.)
+
 ### 9. `buy`'s catch-all swallows programmer errors as `failed`
 `src/roomieorder/purchase.py:554`
 
@@ -212,11 +219,14 @@ next line — fold into one.
 
 - **The entire `purchase.py` selector layer is unverified against the live DOM.** Most
   constants carry `TODO(<store>): verify against live DOM`; the Costco PDP selectors were
-  verified 2026-06-16/17 but **checkout/place-order/confirmation selectors remain
-  guesses**, and no live buy has ever run. This is the single largest stability risk and
-  is already the project's central caveat (see `PROGRESS.md` and project memory). Items
-  #2, #3, #8 above are the parts of this worth hardening *structurally*, independent of
-  selector bring-up.
+  verified 2026-06-16/17, and on **2026-06-17** the Costco *checkout* selectors were
+  verified live too — place-order (`#place-order-button-regular`), payment-method radio
+  (`[automation-id='paymentReviewRadio']`), order-total (`[automation-id='orderTotalOutput']`),
+  and cart-remove (`[automation-id^='removeItemLink_']`). **Still guesses:** the
+  *confirmation* scrape selectors (`ORDER_ID_RE`/`ORDER_ID_LABEL_RE`, post-order total) —
+  reachable only past a real Place Order, which has still never run. This remains the
+  project's central caveat (see `PROGRESS.md` and project memory). Items #2, #3 above are
+  the parts of this worth hardening *structurally*, independent of selector bring-up.
 - **Worker pause is global, not per-item** — one challenge halts all ordering. This is
   intentional fail-safe design, noted only so it isn't "fixed" by accident.
 

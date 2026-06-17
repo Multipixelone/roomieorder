@@ -74,10 +74,14 @@ check` + Attic push.
 - [x] Create/reuse an OpenClaw Telegram target; set `OPENCLAW_TARGET`.
 - [ ] Populate `catalog.json` with real Costco item numbers + slug URLs +
       price ceilings (current entries are placeholders — verify each URL).
-- [ ] Launch the Chromium profile once, log into Costco, confirm default
-      shipping address + saved payment.
+- [x] Launch the Chromium profile once, log into Costco, confirm default
+      shipping address + saved payment. (2026-06-17: profile logged in;
+      `dry-run disinfecting_wipes` shows the shipping address + saved Mastercard,
+      now auto-selected by `_select_payment_method`.)
 - [ ] `roomieorder dry-run <item>` for each staple until it reaches the review
-      page, _then_ flip `DRY_RUN=false` for one cheap item.
+      page, _then_ flip `DRY_RUN=false` for one cheap item. (2026-06-17:
+      `disinfecting_wipes` reaches the review page cleanly; the other staples
+      and the `DRY_RUN=false` go-live are still pending.)
 
 ## infra handoff
 
@@ -117,3 +121,37 @@ No more maintaining two lists. The catalog now drives the Home Assistant config:
 - Verified: `nix flake check` green (package, ha-buttons check, all three
   nixosModules incl. homeAssistant), generator eval matches catalog, 45 tests +
   ruff + mypy still clean.
+
+## Costco checkout bring-up — payment, cart reset, branch consolidation (2026-06-17)
+
+Live-verified the Costco checkout against the real `disinfecting_wipes` item (real
+nix-secrets catalog, real Google Chrome for Akamai). All work is dry-run only — no live
+Place Order has run.
+
+- **Payment-method selection** (`c759fb6`): the live SinglePageCheckoutView needs an
+  explicit click on the saved card before Place Order activates, and the default card
+  isn't reliably pre-selected. Added `_select_payment_method` (clicks the saved-card
+  radio `[automation-id='paymentReviewRadio']` unless already `aria-checked=true`) +
+  `PAYMENT_METHOD_SELECTORS`, called from `_start_checkout`. Deliberately avoids the
+  sibling "enter-a-new-card" radio.
+- **Checkout landing** (`c759fb6`): `_start_checkout` now judges success by *landing* on
+  the review page (`_on_checkout`: "checkout" in URL, place-order button as backstop)
+  instead of trusting the Checkout-CTA click's return — the CTA navigates and Playwright
+  reports the click as a miss when the context tears down mid-navigation, which had made
+  the dry-run bail `no_buy_button` despite reaching checkout.
+- **Verified checkout selectors** (`c759fb6`): corrected `PLACE_ORDER_SELECTORS` to
+  `#place-order-button-regular` (old `automation-id='placeOrderButton'` was count=0);
+  confirmed `[automation-id='orderTotalOutput']` is correct. See IMPROVEMENTS.md #8 + the
+  🔵 selector caveat (updated).
+- **Cart reset** (`6f5094d`, cherry-picked from `fix/costco-cart-reset-and-delivery-stock`):
+  `_reset_cart` drains the shared server-side cart before each buy so a stale line from a
+  prior run can't ride into a live Place Order; Costco drains via `removeItemLink_*` on
+  CheckoutCartDisplayView (bounded at 30, visibility-gated confirm dismissal). Also
+  narrowed Costco `OUT_OF_STOCK_MARKERS` to delivery/online wording so the per-warehouse
+  pick-up widget no longer false-positives a deliverable item to Amazon. Live-verified:
+  dry-run subtotal dropped $87.96 → $21.99 (stale lines drained, exactly one item added).
+- **Branch consolidation**: audited all branches `--no-merged main`. Every one except the
+  cart-reset branch was already in main *by content* (squash-merged via punchlist PR #9);
+  `costco-switch` is a true ancestor. Brought the one genuinely-missing branch in.
+- Verified end-to-end: 118 tests pass, ruff + mypy clean; `dry-run disinfecting_wipes`
+  reaches the review page with the saved Mastercard selected.
