@@ -155,3 +155,25 @@ Place Order has run.
   `costco-switch` is a true ancestor. Brought the one genuinely-missing branch in.
 - Verified end-to-end: 118 tests pass, ruff + mypy clean; `dry-run disinfecting_wipes`
   reaches the review page with the saved Mastercard selected.
+
+## IMPROVEMENTS punch-list closed out — typing pass + doc reconciliation (2026-06-17)
+
+Audited every IMPROVEMENTS.md item against the code: #1–#10, #12, #14, #15, #16 were
+already implemented by prior commits but the doc still listed them as open, and #13 was
+resolved-by-documentation in `conftest.py`. The one genuinely-open code item was **#11**
+(typing).
+
+- **#11 typing** (two atomic commits): `page` is now the Playwright `Page` type
+  (TYPE_CHECKING import), and `BasePurchaser` is `Generic[SourceT]` over
+  `CostcoSource`/`AmazonSource` with `item: CatalogItem`, so the per-store hooks take the
+  concrete source and the `getattr` round-trips are gone. `# type: ignore` count in
+  `purchase.py` dropped **42 → 5** (only the dynamic patchright/playwright *module*
+  handles keep theirs). Typing surfaced and fixed a latent bug: `page.title(timeout=…)` —
+  `Page.title()` takes no timeout, so both call sites were raising `TypeError` (swallowed
+  by their best-effort `try/except`, timeout never applied). Added a `_ClickRole` Literal
+  alias + annotated `_settle`'s state tuple so the role/load-state args type-check.
+- **Doc reconciliation**: `IMPROVEMENTS.md` now carries a verified **✅ Resolved** note on
+  every item, each citing the implementing code; a status banner records the list is
+  worked through, leaving only the 🔵 confirmation-selector caveat.
+- Verified: `nix develop` → mypy --strict + ruff clean, 118 tests pass. No money-path
+  behaviour changed — the typing pass is annotations + getattr→attribute access only.
