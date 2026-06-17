@@ -41,10 +41,10 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Literal, Optional
 
 if TYPE_CHECKING:
-    from playwright.sync_api import BrowserContext
+    from playwright.sync_api import BrowserContext, Page
 
 from roomieorder.config import Config
 from roomieorder.guards import GuardResult
@@ -91,6 +91,10 @@ _BUG_EXCEPTIONS = (
     ImportError,
     NotImplementedError,
 )
+
+# Accessible roles the click helpers target — a subset of Playwright's AriaRole.
+# Stores label the same control as a button or a link across checkout variants.
+_ClickRole = Literal["button", "link"]
 
 _JSONLD_SELECTOR = "script[type='application/ld+json']"
 
@@ -277,11 +281,11 @@ class BasePurchaser:
         """A short id for log/probe messages, e.g. ``item #1640526``."""
         raise NotImplementedError
 
-    def _start_checkout(self, page: object) -> bool:
+    def _start_checkout(self, page: "Page") -> bool:
         """Reach the place-order review page from the product page."""
         raise NotImplementedError
 
-    def _reset_cart(self, page: object) -> None:
+    def _reset_cart(self, page: "Page") -> None:
         """Empty the shared cart before adding this order's item. Base: no-op.
 
         Costco overrides this (its cart is server-side, shared across every run);
@@ -289,7 +293,7 @@ class BasePurchaser:
         do nothing."""
         return None
 
-    def is_logged_in(self, page: object) -> bool:
+    def is_logged_in(self, page: "Page") -> bool:
         """Best-effort sign-in check via the store's account nav.
 
         Both stores' nav reads a 'Sign In'/'Register' affordance when logged out
@@ -297,7 +301,7 @@ class BasePurchaser:
         True is trustworthy but a False may be a miss."""
         for sel in self.ACCOUNT_NAV_SELECTORS:
             try:
-                loc = page.locator(sel).first  # type: ignore[attr-defined]
+                loc = page.locator(sel).first
                 if loc.count() == 0:
                     continue
                 text = loc.inner_text(timeout=2_000)
@@ -307,7 +311,7 @@ class BasePurchaser:
             return "sign in" not in text and "register" not in text
         return False
 
-    def ensure_logged_in(self, page: object) -> bool:
+    def ensure_logged_in(self, page: "Page") -> bool:
         """Make sure the session is authenticated. Base: just report the state.
 
         Stores that re-establish a session from cached credentials (Costco)
@@ -607,7 +611,7 @@ class BasePurchaser:
 
     # ─────────── availability ───────────
 
-    def _check_availability(self, page: object, http_status: Optional[int]) -> Optional[str]:
+    def _check_availability(self, page: "Page", http_status: Optional[int]) -> Optional[str]:
         """Return a human reason when the product can't be ordered here, else None.
 
         Drives the Amazon fallback: a 404, a not-found page, a sold-out marker,
@@ -617,7 +621,7 @@ class BasePurchaser:
         if http_status == 404:
             return "not found (404)"
         try:
-            body = page.locator("body").inner_text(timeout=3_000)  # type: ignore[attr-defined]
+            body = page.locator("body").inner_text(timeout=3_000)
         except Exception:  # noqa: BLE001 — can't read the body; assume available
             body = ""
         if looks_like(body, "", self.NOT_FOUND_MARKERS):
@@ -628,7 +632,7 @@ class BasePurchaser:
             return "is out of stock (add-to-cart unavailable)"
         return None
 
-    def _add_to_cart_disabled(self, page: object) -> bool:
+    def _add_to_cart_disabled(self, page: "Page") -> bool:
         """True only when an add-to-cart control is present *and* disabled.
 
         An absent button isn't treated as out-of-stock here (the selectors are
@@ -636,7 +640,7 @@ class BasePurchaser:
         a present-but-disabled one is the reliable sold-out tell."""
         for sel in self.ADD_TO_CART_SELECTORS:
             try:
-                loc = page.locator(sel).first  # type: ignore[attr-defined]
+                loc = page.locator(sel).first
                 if loc.count() == 0:
                     continue
                 return bool(loc.is_disabled(timeout=2_000))
@@ -689,9 +693,9 @@ class BasePurchaser:
                 context.close()
         return result
 
-    def _page_html(self, page: object) -> str:
+    def _page_html(self, page: "Page") -> str:
         try:
-            return page.content()  # type: ignore[attr-defined,no-any-return]
+            return page.content()
         except Exception:  # noqa: BLE001 — dump whatever we can
             return ""
 
@@ -716,7 +720,7 @@ class BasePurchaser:
             ("signin-submit", self.SIGNIN_SUBMIT_SELECTORS),
         )
 
-    def _probe_selectors(self, page: object) -> str:
+    def _probe_selectors(self, page: "Page") -> str:
         """Human-readable report of which candidate selectors resolve on ``page``.
 
         For each selector: its match count and a short text/``content`` sample,
@@ -724,11 +728,11 @@ class BasePurchaser:
         read-only — it only ever reads counts and text."""
         lines: list[str] = []
         try:
-            lines.append(f"url:   {page.url}")  # type: ignore[attr-defined]
+            lines.append(f"url:   {page.url}")
         except Exception:  # noqa: BLE001
             pass
         try:
-            lines.append(f"title: {page.title(timeout=2_000)}")  # type: ignore[attr-defined]
+            lines.append(f"title: {page.title()}")
         except Exception:  # noqa: BLE001
             pass
         lines.append(f"logged_in:   {self.is_logged_in(page)}")
@@ -740,7 +744,7 @@ class BasePurchaser:
             lines.append("")
         lines.append("[json-ld]")
         try:
-            blocks = page.locator(_JSONLD_SELECTOR)  # type: ignore[attr-defined]
+            blocks = page.locator(_JSONLD_SELECTOR)
             count = blocks.count()
         except Exception:  # noqa: BLE001
             count = 0
@@ -753,9 +757,9 @@ class BasePurchaser:
             lines.append(f"    [{i}] offer_price={_price_from_jsonld(raw)}  ({len(raw)} chars)")
         return "\n".join(lines)
 
-    def _probe_one(self, page: object, selector: str) -> str:
+    def _probe_one(self, page: "Page", selector: str) -> str:
         try:
-            loc = page.locator(selector)  # type: ignore[attr-defined]
+            loc = page.locator(selector)
             count = loc.count()
         except Exception as exc:  # noqa: BLE001
             return f"  {selector}  ERROR {exc}"
@@ -801,10 +805,10 @@ class BasePurchaser:
 
     # ─────────── page helpers ───────────
 
-    def _read_price(self, page: object) -> Optional[float]:
+    def _read_price(self, page: "Page") -> Optional[float]:
         for sel in self.PRICE_SELECTORS:
             try:
-                loc = page.locator(sel).first  # type: ignore[attr-defined]
+                loc = page.locator(sel).first
                 if loc.count() == 0:
                     continue
                 text = loc.inner_text(timeout=2_000)
@@ -818,14 +822,14 @@ class BasePurchaser:
         # the page's structured data, which is far less brittle.
         return self._read_price_from_metadata(page)
 
-    def _read_price_from_metadata(self, page: object) -> Optional[float]:
+    def _read_price_from_metadata(self, page: "Page") -> Optional[float]:
         """Read the product price from page metadata when the visible price
         element can't be located: OpenGraph/schema.org ``<meta>`` tags first,
         then JSON-LD ``offers``. Both are server-rendered into the initial HTML,
         so they're present even before the price block hydrates."""
         for sel in self.PRICE_META_SELECTORS:
             try:
-                loc = page.locator(sel).first  # type: ignore[attr-defined]
+                loc = page.locator(sel).first
                 if loc.count() == 0:
                     continue
                 content = loc.get_attribute("content", timeout=2_000)
@@ -835,7 +839,7 @@ class BasePurchaser:
             if price is not None:
                 return price
         try:
-            blocks = page.locator(_JSONLD_SELECTOR)  # type: ignore[attr-defined]
+            blocks = page.locator(_JSONLD_SELECTOR)
             count = blocks.count()
         except Exception:  # noqa: BLE001 — no JSON-LD to read
             return None
@@ -849,7 +853,9 @@ class BasePurchaser:
                 return price
         return None
 
-    def _click_by_role(self, page: object, roles: tuple[str, ...], name: str) -> bool:
+    def _click_by_role(
+        self, page: "Page", roles: tuple[_ClickRole, ...], name: str
+    ) -> bool:
         """Click the first role/accessible-name match across ``roles``.
 
         Stores label the same control as a button or a link across variants, so
@@ -858,14 +864,14 @@ class BasePurchaser:
         pattern = re.compile(re.escape(name), re.I)
         for role in roles:
             try:
-                loc = page.get_by_role(role, name=pattern).first  # type: ignore[attr-defined]
+                loc = page.get_by_role(role, name=pattern).first
                 loc.click(timeout=5_000)
                 return True
             except Exception:  # noqa: BLE001 — try the next role
                 continue
         return False
 
-    def _place_order(self, page: object) -> bool:
+    def _place_order(self, page: "Page") -> bool:
         """Click Place Order, waiting on the button's *accessible name*.
 
         CSS ids can drift between a store's checkout variants, so keying off the
@@ -877,7 +883,7 @@ class BasePurchaser:
         than a bare ``get_by_text``, which would happily click a heading or label
         that merely contains "Place Order" and isn't the submit control."""
         name_re = re.compile(r"place (your )?order", re.I)
-        btn = page.get_by_role("button", name=name_re)  # type: ignore[attr-defined]
+        btn = page.get_by_role("button", name=name_re)
         try:
             btn.first.wait_for(state="visible", timeout=_STEP_TIMEOUT_MS)
             btn.first.click(timeout=5_000)
@@ -888,27 +894,27 @@ class BasePurchaser:
             return True
         for role in ("button", "link"):
             try:
-                page.get_by_role(role, name=name_re).first.click(timeout=5_000)  # type: ignore[attr-defined]
+                page.get_by_role(role, name=name_re).first.click(timeout=5_000)
                 return True
             except Exception:  # noqa: BLE001 — try the next clickable role
                 continue
         return False
 
-    def _page_debug(self, page: object) -> str:
+    def _page_debug(self, page: "Page") -> str:
         """A short 'url · title' tag for failure messages, so the operator can
         tell what page the worker actually reached without a screenshot."""
         try:
-            url = page.url  # type: ignore[attr-defined]
+            url = page.url
         except Exception:  # noqa: BLE001
             url = "?"
         try:
-            title = page.title(timeout=2_000)  # type: ignore[attr-defined]
+            title = page.title()
         except Exception:  # noqa: BLE001
             title = "?"
         return f"{url} · {title}".strip(" ·")
 
     def _wait_for_any(
-        self, page: object, selectors: tuple[str, ...], timeout: int = _STEP_TIMEOUT_MS
+        self, page: "Page", selectors: tuple[str, ...], timeout: int = _STEP_TIMEOUT_MS
     ) -> bool:
         """Block until any of ``selectors`` is visible, then return True.
 
@@ -919,15 +925,15 @@ class BasePurchaser:
         if not selectors:
             return False
         try:
-            page.wait_for_selector(", ".join(selectors), timeout=timeout)  # type: ignore[attr-defined]
+            page.wait_for_selector(", ".join(selectors), timeout=timeout)
             return True
         except Exception:  # noqa: BLE001 — caller handles the miss
             return False
 
-    def _click_first(self, page: object, selectors: tuple[str, ...]) -> bool:
+    def _click_first(self, page: "Page", selectors: tuple[str, ...]) -> bool:
         for sel in selectors:
             try:
-                loc = page.locator(sel).first  # type: ignore[attr-defined]
+                loc = page.locator(sel).first
                 if loc.count() == 0:
                     continue
                 loc.click(timeout=5_000)
@@ -937,7 +943,7 @@ class BasePurchaser:
         return False
 
     def _submitted_unconfirmed(
-        self, page: object, item_key: str, detail: str
+        self, page: "Page", item_key: str, detail: str
     ) -> PurchaseResult:
         """Place Order was clicked but we couldn't confirm the result.
 
@@ -956,7 +962,7 @@ class BasePurchaser:
             screenshot=shot,
         )
 
-    def _scrape_confirmation(self, page: object) -> tuple[Optional[str], Optional[float]]:
+    def _scrape_confirmation(self, page: "Page") -> tuple[Optional[str], Optional[float]]:
         # Defensive read: the confirmation body can paint a beat after the order
         # POST returns, so a single read can miss it. Retry a few times before
         # giving up — a missed scrape here is what makes a placed order look
@@ -964,7 +970,7 @@ class BasePurchaser:
         body = ""
         for attempt in range(3):
             try:
-                body = page.locator("body").inner_text(timeout=5_000)  # type: ignore[attr-defined]
+                body = page.locator("body").inner_text(timeout=5_000)
             except Exception:  # noqa: BLE001
                 body = ""
             if self._find_order_id(body) is not None:
@@ -975,7 +981,7 @@ class BasePurchaser:
         total = None
         for sel in self.ORDER_TOTAL_SELECTORS:
             try:
-                loc = page.locator(sel).first  # type: ignore[attr-defined]
+                loc = page.locator(sel).first
                 if loc.count() == 0:
                     continue
                 total = parse_price(loc.inner_text(timeout=2_000))
@@ -999,7 +1005,7 @@ class BasePurchaser:
         m = self.ORDER_ID_RE.search(body)
         return m.group(0) if m else None
 
-    def _settle(self, page: object) -> None:
+    def _settle(self, page: "Page") -> None:
         """Let a freshly-navigated page paint before we shoot it.
 
         ``domcontentloaded`` fires before the store's JS renders the checkout
@@ -1008,30 +1014,30 @@ class BasePurchaser:
         goes fully ``networkidle``, so we cap it and shoot whatever we have."""
         for state in ("load", "networkidle"):
             try:
-                page.wait_for_load_state(state, timeout=8_000)  # type: ignore[attr-defined]
+                page.wait_for_load_state(state, timeout=8_000)
             except Exception:  # noqa: BLE001 — bounded wait; shoot what painted
                 pass
 
-    def _is_challenge(self, page: object) -> bool:
+    def _is_challenge(self, page: "Page") -> bool:
         try:
-            text = page.locator("body").inner_text(timeout=3_000)  # type: ignore[attr-defined]
-            url = page.url  # type: ignore[attr-defined]
+            text = page.locator("body").inner_text(timeout=3_000)
+            url = page.url
         except Exception:  # noqa: BLE001
             return False
         return looks_like(text, url, self.CHALLENGE_MARKERS)
 
-    def _is_signin(self, page: object) -> bool:
+    def _is_signin(self, page: "Page") -> bool:
         try:
-            url = page.url  # type: ignore[attr-defined]
+            url = page.url
         except Exception:  # noqa: BLE001
             return False
         try:
-            text = page.locator("body").inner_text(timeout=3_000)  # type: ignore[attr-defined]
+            text = page.locator("body").inner_text(timeout=3_000)
         except Exception:  # noqa: BLE001
             text = ""
         return looks_like(text, url, self.SIGNIN_MARKERS)
 
-    def _challenge(self, page: object, item_key: str, where: str) -> PurchaseResult:
+    def _challenge(self, page: "Page", item_key: str, where: str) -> PurchaseResult:
         shot = self._screenshot(page, item_key, f"challenge_{where}")
         return PurchaseResult(
             status="challenge",
@@ -1042,7 +1048,7 @@ class BasePurchaser:
             screenshot=shot,
         )
 
-    def _signin_required(self, page: object, item_key: str, where: str) -> PurchaseResult:
+    def _signin_required(self, page: "Page", item_key: str, where: str) -> PurchaseResult:
         """The profile got bounced to the sign-in wall on the ``where`` page —
         it's logged out. Pause with a clear next step rather than mislabeling the
         login form as a review screenshot."""
@@ -1056,10 +1062,10 @@ class BasePurchaser:
             screenshot=shot,
         )
 
-    def _screenshot(self, page: object, item_key: str, tag: str) -> Optional[Path]:
+    def _screenshot(self, page: "Page", item_key: str, tag: str) -> Optional[Path]:
         path = self._shot_path(item_key, tag)
         try:
-            page.screenshot(path=str(path), full_page=False)  # type: ignore[attr-defined]
+            page.screenshot(path=str(path), full_page=False)
             return path
         except Exception as exc:  # noqa: BLE001
             _logger.warning("screenshot failed (%s): %s", tag, exc)
@@ -1235,7 +1241,7 @@ class CostcoPurchaser(BasePurchaser):
     # WC_AUTHENTICATION_-1002 vs member WC_AUTHENTICATION_2436747244.
     _WC_AUTH_COOKIE_RE = re.compile(r"^WC_AUTHENTICATION_\d+$")
 
-    def is_logged_in(self, page: object) -> bool:
+    def is_logged_in(self, page: "Page") -> bool:
         """True when the WC session cookie carries a real (positive) member id.
 
         Costco's session cookie is the reliable signal: the header keeps both the
@@ -1245,7 +1251,7 @@ class CostcoPurchaser(BasePurchaser):
         account-button DOM check (ACCOUNT_NAV_SELECTORS) if the jar can't be read.
         """
         try:
-            cookies = page.context.cookies()  # type: ignore[attr-defined]
+            cookies = page.context.cookies()
         except Exception:  # noqa: BLE001 — fall back to the DOM signal
             cookies = []
         for cookie in cookies:
@@ -1253,7 +1259,7 @@ class CostcoPurchaser(BasePurchaser):
                 return True
         return super().is_logged_in(page)
 
-    def ensure_logged_in(self, page: object) -> bool:
+    def ensure_logged_in(self, page: "Page") -> bool:
         """Re-establish Costco's member session, silently, from the saved profile.
 
         Costco drops its WC_AUTHENTICATION *session* cookie on every fresh browser
@@ -1269,7 +1275,7 @@ class CostcoPurchaser(BasePurchaser):
         if self.is_logged_in(page):
             return True
         try:
-            page.goto(  # type: ignore[attr-defined]
+            page.goto(
                 f"https://www.{self.domain}/LogonForm?langId=-1&storeId=10301&catalogId=10701",
                 wait_until="domcontentloaded",
             )
@@ -1278,7 +1284,7 @@ class CostcoPurchaser(BasePurchaser):
         self._settle(page)
         return self.is_logged_in(page)
 
-    def _start_checkout(self, page: object) -> bool:
+    def _start_checkout(self, page: "Page") -> bool:
         """Add to cart → go to cart → checkout → select payment → review.
 
         Costco has no one-click Buy Now: the flow is add-to-cart, then the cart,
@@ -1295,7 +1301,7 @@ class CostcoPurchaser(BasePurchaser):
             page, self.ADD_TO_CART_SELECTORS
         ):
             return False
-        page.wait_for_load_state("domcontentloaded")  # type: ignore[attr-defined]
+        page.wait_for_load_state("domcontentloaded")
         self._settle(page)
 
         # ── go to cart → checkout ──
@@ -1306,7 +1312,7 @@ class CostcoPurchaser(BasePurchaser):
         if not self._on_checkout(page):
             # Verified live 2026-06-17: /CheckoutCartView 302s (with a krypto
             # ticket) to /CheckoutCartDisplayView, the real cart page.
-            page.goto(  # type: ignore[attr-defined]
+            page.goto(
                 f"https://www.{self.domain}/CheckoutCartView",
                 wait_until="domcontentloaded",
             )
@@ -1327,26 +1333,26 @@ class CostcoPurchaser(BasePurchaser):
         self._select_payment_method(page)
         return True
 
-    def _on_checkout(self, page: object) -> bool:
+    def _on_checkout(self, page: "Page") -> bool:
         """True once we've landed on the place-order review page.
 
         Costco's SinglePageCheckoutView carries "Checkout" in its URL; the
         Place Order button is the structural backstop when the URL can't be
         read. Pure detection — clicks nothing."""
         try:
-            if "checkout" in (page.url or "").lower():  # type: ignore[attr-defined]
+            if "checkout" in (page.url or "").lower():
                 return True
         except Exception:  # noqa: BLE001 — fall back to the DOM signal
             pass
         for sel in self.PLACE_ORDER_SELECTORS:
             try:
-                if page.locator(sel).first.count() > 0:  # type: ignore[attr-defined]
+                if page.locator(sel).first.count() > 0:
                     return True
             except Exception:  # noqa: BLE001 — try the next candidate
                 continue
         return False
 
-    def _select_payment_method(self, page: object) -> bool:
+    def _select_payment_method(self, page: "Page") -> bool:
         """Select the saved default card so Place Order isn't inert.
 
         Clicks the saved-card radio (``paymentReviewRadio``) unless it already
@@ -1357,7 +1363,7 @@ class CostcoPurchaser(BasePurchaser):
         proceeds to the review screenshot so the miss is visible)."""
         for sel in self.PAYMENT_METHOD_SELECTORS:
             try:
-                loc = page.locator(sel).first  # type: ignore[attr-defined]
+                loc = page.locator(sel).first
                 if loc.count() == 0:
                     continue
                 if (loc.get_attribute("aria-checked", timeout=2_000) or "").lower() == "true":
@@ -1374,7 +1380,7 @@ class CostcoPurchaser(BasePurchaser):
     # real cart's line count.
     _MAX_CART_LINES = 30
 
-    def _reset_cart(self, page: object) -> None:
+    def _reset_cart(self, page: "Page") -> None:
         """Remove every line from the Costco cart so checkout holds only our item.
 
         Costco's cart is server-side and shared across every launch of the saved
@@ -1387,7 +1393,7 @@ class CostcoPurchaser(BasePurchaser):
         never blocks the order.
         """
         try:
-            page.goto(  # type: ignore[attr-defined]
+            page.goto(
                 f"https://www.{self.domain}/CheckoutCartView",
                 wait_until="domcontentloaded",
             )
@@ -1400,7 +1406,7 @@ class CostcoPurchaser(BasePurchaser):
             self._confirm_if_visible(page, self.CART_CONFIRM_SELECTORS)
             self._settle(page)
 
-    def _confirm_if_visible(self, page: object, selectors: tuple[str, ...]) -> None:
+    def _confirm_if_visible(self, page: "Page", selectors: tuple[str, ...]) -> None:
         """Click a confirm-modal button, but only if it actually renders visible.
 
         Costco's confirm-modal markup lives hidden in the DOM whether or not a
@@ -1409,7 +1415,7 @@ class CostcoPurchaser(BasePurchaser):
         present-but-hidden (the common case) → time out fast and move on."""
         for sel in selectors:
             try:
-                loc = page.locator(sel).first  # type: ignore[attr-defined]
+                loc = page.locator(sel).first
                 loc.wait_for(state="visible", timeout=1_500)
                 loc.click(timeout=3_000)
                 return
@@ -1518,7 +1524,7 @@ class AmazonPurchaser(BasePurchaser):
     def _source_label(self, source: object) -> str:
         return f"ASIN {getattr(source, 'asin')}"
 
-    def _start_checkout(self, page: object) -> bool:
+    def _start_checkout(self, page: "Page") -> bool:
         """Click Buy Now; fall back to Add to Cart → Proceed to checkout.
         TODO(amazon): verify against live DOM — every step below.
         """
@@ -1527,13 +1533,13 @@ class AmazonPurchaser(BasePurchaser):
         if not self._click_first(page, self.ADD_TO_CART_SELECTORS):
             return False
         # Cart interstitial → checkout.
-        page.wait_for_load_state("domcontentloaded")  # type: ignore[attr-defined]
+        page.wait_for_load_state("domcontentloaded")
         for sel in ("#sc-buy-box-ptc-button", "input[name='proceedToRetailCheckout']"):
             if self._click_first(page, (sel,)):
                 return True
         # Some flows expose a role-named link instead.
         try:
-            page.get_by_role(  # type: ignore[attr-defined]
+            page.get_by_role(
                 "link", name=re.compile("proceed to checkout", re.I)
             ).first.click(timeout=5_000)
             return True
