@@ -825,22 +825,27 @@ class BasePurchaser:
         ids alone could read as "couldn't find Place Order" even when the button
         is right there. The visible text is the most stable handle, so wait on
         the role-named button first and click it promptly — before the checkout
-        session goes stale — then fall back to the ids and a looser text match."""
+        session goes stale — then fall back to the ids and a clickable-role text
+        match. The last resort stays on *clickable roles* (button/link) rather
+        than a bare ``get_by_text``, which would happily click a heading or label
+        that merely contains "Place Order" and isn't the submit control."""
         name_re = re.compile(r"place (your )?order", re.I)
         btn = page.get_by_role("button", name=name_re)  # type: ignore[attr-defined]
         try:
             btn.first.wait_for(state="visible", timeout=_STEP_TIMEOUT_MS)
             btn.first.click(timeout=5_000)
             return True
-        except Exception:  # noqa: BLE001 — fall through to the id/text fallbacks
+        except Exception:  # noqa: BLE001 — fall through to the id/role fallbacks
             pass
         if self._click_first(page, self.PLACE_ORDER_SELECTORS):
             return True
-        try:
-            page.get_by_text(name_re).first.click(timeout=5_000)  # type: ignore[attr-defined]
-            return True
-        except Exception:  # noqa: BLE001 — no match anywhere; caller fails
-            return False
+        for role in ("button", "link"):
+            try:
+                page.get_by_role(role, name=name_re).first.click(timeout=5_000)  # type: ignore[attr-defined]
+                return True
+            except Exception:  # noqa: BLE001 — try the next clickable role
+                continue
+        return False
 
     def _page_debug(self, page: object) -> str:
         """A short 'url · title' tag for failure messages, so the operator can
