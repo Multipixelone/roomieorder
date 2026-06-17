@@ -289,6 +289,19 @@ class Store:
             ).fetchone()
         return _parse(row["updated_at"]) if row else None
 
+    def last_placed_at_all(self) -> dict[str, datetime]:
+        """Most recent *placed* time for every item_key, in a single query.
+
+        The dashboard poll (`GET /items`) needs the cooldown clock for the whole
+        catalog at once; this grouped read replaces one ``last_placed_at`` query
+        per item. Item keys with no placed order simply don't appear in the map."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT item_key, MAX(updated_at) AS ts FROM queue "
+                "WHERE status='placed' GROUP BY item_key"
+            ).fetchall()
+        return {r["item_key"]: _parse(r["ts"]) for r in rows}
+
     def spend_since(self, hours: float = 24.0) -> float:
         """Sum of order_total for placed orders in the trailing window."""
         cutoff = _iso(_utcnow() - timedelta(hours=hours))

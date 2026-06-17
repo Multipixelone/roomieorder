@@ -92,6 +92,17 @@ def test_last_placed_at(store: Store) -> None:
     assert store.last_placed_at("dish_soap") is None
 
 
+def test_last_placed_at_all_groups_by_item(store: Store) -> None:
+    assert store.last_placed_at_all() == {}
+    a = store.enqueue("paper_towels")
+    store.mark(a, "placed", order_total=10.0)
+    b = store.enqueue("dish_soap")
+    store.mark(b, "failed")  # non-placed → absent from the map
+    grouped = store.last_placed_at_all()
+    assert set(grouped) == {"paper_towels"}
+    assert grouped["paper_towels"] == store.last_placed_at("paper_towels")
+
+
 def test_pause_roundtrip(store: Store) -> None:
     assert store.is_paused() is False
     store.set_paused(True, "captcha")

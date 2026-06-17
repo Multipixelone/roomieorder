@@ -216,15 +216,16 @@ class Engine:
         """Per-item cooldown snapshot for the HA dashboard (`GET /items`).
 
         Mirrors the cooldown arm of :func:`guards.check_intake` — keep the two
-        in sync. Catalog is tiny, so a couple of indexed lookups per item is
-        cheap enough to compute on every poll. Only *placed* orders arm the
+        in sync. One grouped query fetches every item's last-placed time, so the
+        poll cost is flat in the catalog size. Only *placed* orders arm the
         cooldown, so nothing grays out while ``dry_run`` is on (PLAN §4).
         """
         current = now or datetime.now(timezone.utc)
+        placed_at = self.store.last_placed_at_all()
         out: dict[str, ItemStatus] = {}
         for key in sorted(self.catalog):
             item = self.catalog[key]
-            last_placed = self.store.last_placed_at(key)
+            last_placed = placed_at.get(key)
             cooldown_until: Optional[datetime] = None
             on_cooldown = False
             if last_placed is not None and item.cooldown_days > 0:
