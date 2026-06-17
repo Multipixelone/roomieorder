@@ -1086,13 +1086,30 @@ class CostcoPurchaser(BasePurchaser):
         "input[value='Add to Cart']",
         "button#add-to-cart-btn",
     )
-    # TODO(costco): verify against live DOM — final place-order button.
+    # Verified against the live SinglePageCheckoutView 2026-06-17: the final
+    # control is a `<div id="place-order-button-regular">` (not the old
+    # `automation-id='placeOrderButton'` guess, which is count=0). Legacy guesses
+    # kept as backstops in case the checkout variant differs.
     PLACE_ORDER_SELECTORS = (
+        "#place-order-button-regular",
         "[automation-id='placeOrderButton']",
         "input[value='Place Order']",
         "button#place-order",
     )
-    # TODO(costco): verify against live DOM — order-confirmation grand-total.
+    # Saved-card payment radios on SinglePageCheckoutView. Verified live
+    # 2026-06-17: the default card's selector is a role=radio `<div>` with
+    # `automation-id='paymentReviewRadio'` (`#radio-credit-card-review-ada-handler`),
+    # carrying `aria-checked` and proxying the hidden `<input
+    # #radio-credit-card-review>` (tabindex=-1). It is the "select my saved card"
+    # control and is NOT reliably pre-selected on load — Place Order stays inert
+    # until a payment method is chosen. The sibling `paymentRadio`
+    # (`#radio-credit-card-ada-handler`, "Credit or Debit Card") is the
+    # *enter-a-new-card* option, so it is deliberately NOT a candidate here.
+    PAYMENT_METHOD_SELECTORS = (
+        "[automation-id='paymentReviewRadio']",
+        "#radio-credit-card-review-ada-handler",
+    )
+    # Verified against live DOM 2026-06-17 — order-confirmation grand-total.
     ORDER_TOTAL_SELECTORS = (
         "[automation-id='orderTotalOutput']",
         ".order-total .value",
@@ -1223,13 +1240,16 @@ class CostcoPurchaser(BasePurchaser):
         return self.is_logged_in(page)
 
     def _start_checkout(self, page: object) -> bool:
-        """Add to cart → go to cart → checkout → (delivery/address) review.
+        """Add to cart → go to cart → checkout → select payment → review.
 
         Costco has no one-click Buy Now: the flow is add-to-cart, then the cart,
-        then a Checkout CTA, then possibly a delivery-method / address
-        confirmation before the place-order button. Role/text first for
-        resilience, CSS ids as a backstop.
-        TODO(costco): verify against live DOM — every step below.
+        then a Checkout CTA, then a delivery/address confirmation, and finally —
+        verified live 2026-06-17 — an explicit payment-method selection before
+        Place Order activates. Role/text first for resilience, CSS ids as a
+        backstop. Success is judged by *landing* on SinglePageCheckoutView, not
+        by the click's return: the Checkout CTA navigates, and Playwright can
+        report the click as a miss when the context tears down mid-navigation
+        even though it took.
         """
         # ── add to cart ──
         if not self._click_by_role(page, ("button",), "add to cart") and not self._click_first(
@@ -1239,25 +1259,74 @@ class CostcoPurchaser(BasePurchaser):
         page.wait_for_load_state("domcontentloaded")  # type: ignore[attr-defined]
         self._settle(page)
 
-        # ── go to cart ──
-        # Prefer the flyout's Checkout CTA if present; otherwise navigate to the
-        # cart page directly and check out from there.
-        if not self._click_by_role(page, ("button", "link"), "checkout"):
-            # TODO(costco): verify against live DOM — cart URL.
+        # ── go to cart → checkout ──
+        # Prefer the flyout's Checkout CTA; if that doesn't land us on the
+        # checkout view, go to the cart page directly and check out from there.
+        self._click_by_role(page, ("button", "link"), "checkout")
+        self._settle(page)
+        if not self._on_checkout(page):
             page.goto(  # type: ignore[attr-defined]
                 f"https://www.{self.domain}/CheckoutCartView",
                 wait_until="domcontentloaded",
             )
             self._settle(page)
-            if not self._click_by_role(page, ("button", "link"), "checkout"):
+            self._click_by_role(page, ("button", "link"), "checkout")
+            self._settle(page)
+            if not self._on_checkout(page):
                 return False
 
         # ── delivery / address confirmation → review ──
-        page.wait_for_load_state("domcontentloaded")  # type: ignore[attr-defined]
-        self._settle(page)
         # TODO(costco): verify against live DOM — does delivery need a click?
         self._click_by_role(page, ("button", "link"), "continue")
+        self._settle(page)
+
+        # ── select the saved default payment method ──
+        # Place Order is inert until a payment method is chosen, and the saved
+        # card isn't reliably pre-selected, so click its radio here.
+        self._select_payment_method(page)
         return True
+
+    def _on_checkout(self, page: object) -> bool:
+        """True once we've landed on the place-order review page.
+
+        Costco's SinglePageCheckoutView carries "Checkout" in its URL; the
+        Place Order button is the structural backstop when the URL can't be
+        read. Pure detection — clicks nothing."""
+        try:
+            if "checkout" in (page.url or "").lower():  # type: ignore[attr-defined]
+                return True
+        except Exception:  # noqa: BLE001 — fall back to the DOM signal
+            pass
+        for sel in self.PLACE_ORDER_SELECTORS:
+            try:
+                if page.locator(sel).first.count() > 0:  # type: ignore[attr-defined]
+                    return True
+            except Exception:  # noqa: BLE001 — try the next candidate
+                continue
+        return False
+
+    def _select_payment_method(self, page: object) -> bool:
+        """Select the saved default card so Place Order isn't inert.
+
+        Clicks the saved-card radio (``paymentReviewRadio``) unless it already
+        reads ``aria-checked='true'`` — re-clicking a committed radio is a
+        no-op, but skipping it keeps the flow idempotent and avoids fighting a
+        selection the page already made. Best-effort: returns True once a radio
+        is selected/clicked, False if no candidate resolves (the caller still
+        proceeds to the review screenshot so the miss is visible)."""
+        for sel in self.PAYMENT_METHOD_SELECTORS:
+            try:
+                loc = page.locator(sel).first  # type: ignore[attr-defined]
+                if loc.count() == 0:
+                    continue
+                if (loc.get_attribute("aria-checked", timeout=2_000) or "").lower() == "true":
+                    return True
+                loc.click(timeout=5_000)
+                self._settle(page)
+                return True
+            except Exception:  # noqa: BLE001 — try the next candidate
+                continue
+        return False
 
 
 class AmazonPurchaser(BasePurchaser):
