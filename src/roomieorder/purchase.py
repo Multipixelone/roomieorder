@@ -80,6 +80,18 @@ def _playwright_api() -> object:
 # or a challenge, not slowness.
 _STEP_TIMEOUT_MS = 20_000
 
+# Exception types that mean "this is our bug", not "the store flaked". These
+# propagate out of `buy` instead of being laundered into a `failed` result, so a
+# code defect surfaces (and pauses the worker via the loop's handler) rather than
+# masquerading as a sold-out item with a one-line screenshot.
+_BUG_EXCEPTIONS = (
+    AttributeError,
+    TypeError,
+    NameError,
+    ImportError,
+    NotImplementedError,
+)
+
 _JSONLD_SELECTOR = "script[type='application/ld+json']"
 
 # First number-ish run in a blob: digits with optional grouping/decimal
@@ -547,6 +559,13 @@ class BasePurchaser:
                     message=f"timed out: {exc}".split("\n")[0],
                     screenshot=shot,
                 )
+            except _BUG_EXCEPTIONS:
+                # A programmer error (bad attr/type/name, missing override, …).
+                # Screenshot for context, then re-raise so it can't hide as
+                # "store flakiness" — the worker loop records it and pauses.
+                _logger.exception("buy flow hit a programmer error for %s", item_key)
+                self._screenshot(page, item_key, "crash")
+                raise
             except Exception as exc:  # noqa: BLE001 — convert any flake to a safe result
                 _logger.exception("buy flow crashed for %s", item_key)
                 shot = self._screenshot(page, item_key, "crash")
