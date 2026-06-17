@@ -16,8 +16,7 @@ never mutate state, so they're trivially testable.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta, timezone
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from roomieorder.catalog import CatalogItem
