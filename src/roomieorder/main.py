@@ -14,13 +14,14 @@ the worker drains the backlog on wake.
 
 from __future__ import annotations
 
+import hmac
 import logging
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 from roomieorder.catalog import Catalog, CatalogItem, load_catalog
@@ -41,6 +42,19 @@ _WORKER_POLL_SECONDS = 5.0
 # `needs_review` means an order may have been placed but couldn't be confirmed —
 # halt so a human checks before anything re-orders the item.
 _PAUSE_STATUSES = {"challenge", "failed", "spend_capped", "needs_review"}
+
+
+def _require_token(config: Config, provided: Optional[str]) -> None:
+    """Reject the request when an intake token is configured and doesn't match.
+
+    No-op when ``config.intake_token`` is empty (the loopback-only default), so
+    local dev isn't burdened. Compared in constant time to avoid leaking the
+    secret through response timing."""
+    expected = config.intake_token
+    if not expected:
+        return
+    if provided is None or not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=401, detail="invalid or missing intake token")
 
 
 def _product_id(item: CatalogItem, provider: str) -> str:
@@ -267,8 +281,12 @@ def create_app(config: Optional[Config] = None) -> FastAPI:
         return [r.model_dump(mode="json") for r in engine.store.list_queue(limit)]
 
     @app.post("/reorder")
-    def reorder(req: ReorderRequest) -> dict[str, object]:
+    def reorder(
+        req: ReorderRequest,
+        x_roomieorder_token: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
         engine: Engine = app.state.engine
+        _require_token(engine.config, x_roomieorder_token)
         item = engine.catalog.get(req.item_key)
         if item is None:
             raise HTTPException(status_code=404, detail=f"unknown item_key: {req.item_key}")

@@ -70,6 +70,12 @@ class Config(BaseModel):
     # Intake service
     host: str = "127.0.0.1"
     port: int = Field(default=8723, ge=1, le=65535)
+    # Optional shared secret for POST /reorder. Empty (the default) means no auth
+    # — fine for the loopback-only default bind. Set it the moment `host` is
+    # widened to serve Home Assistant on the LAN, so not every device on the
+    # network can trigger spending. Sent by the caller as the X-Roomieorder-Token
+    # header.
+    intake_token: str = ""
 
     # Paths
     catalog_path: Path = Path("catalog.json")
@@ -155,6 +161,7 @@ def load_config() -> Config:
         debounce_seconds=_env_int("ROOMIEORDER_DEBOUNCE_SECONDS", 60),
         host=_env_str("ROOMIEORDER_HOST", "127.0.0.1"),
         port=_env_int("ROOMIEORDER_PORT", 8723),
+        intake_token=_env_str("ROOMIEORDER_INTAKE_TOKEN", ""),
         catalog_path=Path(_env_str("ROOMIEORDER_CATALOG", "catalog.json")),
         db_path=Path(_env_str("ROOMIEORDER_DB", "data/state.sqlite")),
         profile_dir=Path(_env_str("ROOMIEORDER_PROFILE_DIR", "data/profile")),

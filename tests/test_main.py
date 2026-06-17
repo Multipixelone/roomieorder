@@ -109,6 +109,35 @@ def test_items_reports_cooldown(client: TestClient) -> None:
     assert client.get("/items").json()["dish_soap"]["on_cooldown"] is False
 
 
+def test_reorder_requires_token_when_configured(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
+    monkeypatch.setattr("roomieorder.main.Orchestrator", FakeOrchestrator)
+    secured = config.model_copy(update={"intake_token": "s3cret"})
+    from roomieorder.main import create_app
+
+    with TestClient(create_app(secured)) as c:
+        # No header → rejected; wrong header → rejected; right header → accepted.
+        assert c.post("/reorder", json={"item_key": "paper_towels"}).status_code == 401
+        bad = c.post(
+            "/reorder", json={"item_key": "paper_towels"}, headers={"X-Roomieorder-Token": "nope"}
+        )
+        assert bad.status_code == 401
+        ok = c.post(
+            "/reorder",
+            json={"item_key": "paper_towels"},
+            headers={"X-Roomieorder-Token": "s3cret"},
+        )
+        assert ok.status_code == 200 and ok.json()["accepted"] is True
+
+
+def test_reorder_open_when_no_token(client: TestClient) -> None:
+    # Default config has no token → no header needed (loopback dev case).
+    r = client.post("/reorder", json={"item_key": "paper_towels"})
+    assert r.status_code == 200
+
+
 def test_startup_recovers_orphaned_in_progress(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
     # Simulate a crash: a row left in_progress in the DB before the app boots.
     monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
