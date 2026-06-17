@@ -14,10 +14,11 @@ Statuses that mean "a human must intervene" (``challenge``, ``failed``,
 from __future__ import annotations
 
 import logging
+from typing import Any, Union
 
-from roomieorder.catalog import CatalogItem
+from roomieorder.catalog import AmazonSource, CatalogItem, CostcoSource
 from roomieorder.config import Config
-from roomieorder.guards import check_price_ceiling, check_spend_cap
+from roomieorder.guards import GuardResult, check_price_ceiling, check_spend_cap
 from roomieorder.purchase import (
     AmazonPurchaser,
     BasePurchaser,
@@ -26,6 +27,10 @@ from roomieorder.purchase import (
     PurchaseResult,
 )
 from roomieorder.store import Store
+
+# Either store's source shape. The chain pairs each with its own purchaser, so
+# the buy/proceed-check sites accept the union and read the common fields.
+Source = Union[CostcoSource, AmazonSource]
 
 _logger = logging.getLogger(__name__)
 
@@ -41,13 +46,13 @@ class Orchestrator:
         self.config = config
         self.store = store
 
-    def _providers(self, item: CatalogItem) -> list[tuple[str, object, BasePurchaser]]:
+    def _providers(self, item: CatalogItem) -> list[tuple[str, Source, BasePurchaser[Any]]]:
         """The (name, source, purchaser) chain for ``item``, in fallback order.
 
         Costco first, Amazon second; only declared sources appear. Each store
         gets its own browser profile so their sessions/anti-bot state don't mix.
         """
-        chain: list[tuple[str, object, BasePurchaser]] = []
+        chain: list[tuple[str, Source, BasePurchaser[Any]]] = []
         if item.costco is not None:
             chain.append(
                 (
@@ -74,11 +79,11 @@ class Orchestrator:
             )
         return chain
 
-    def _proceed_check(self, item: CatalogItem, source: object) -> ProceedCheck:
+    def _proceed_check(self, item: CatalogItem, source: Source) -> ProceedCheck:
         """Per-store guard: the source's own price ceiling, then the global cap."""
-        ceiling = getattr(source, "price_ceiling")
+        ceiling = source.price_ceiling
 
-        def check(live_price: float):  # type: ignore[no-untyped-def]
+        def check(live_price: float) -> GuardResult:
             ceiling_result = check_price_ceiling(item.title, ceiling, live_price)
             if not ceiling_result.ok:
                 return ceiling_result

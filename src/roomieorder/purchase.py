@@ -41,14 +41,20 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Literal, Optional
+from typing import TYPE_CHECKING, Callable, Generic, Literal, Optional, TypeVar
 
 if TYPE_CHECKING:
     from playwright.sync_api import BrowserContext, Page
 
+from roomieorder.catalog import AmazonSource, CatalogItem, CostcoSource
 from roomieorder.config import Config
 from roomieorder.guards import GuardResult
 from roomieorder.store import Status
+
+# Each purchaser drives exactly one store's source shape; bind it so the buy
+# skeleton on the base can pass the concrete CostcoSource/AmazonSource through to
+# the subclass hooks (_resolve_url/_source_label) without a getattr round-trip.
+SourceT = TypeVar("SourceT", CostcoSource, AmazonSource)
 
 _logger = logging.getLogger(__name__)
 
@@ -229,7 +235,7 @@ def looks_like(text: str, url: str, markers: tuple[str, ...]) -> bool:
     return any(marker in haystack for marker in markers)
 
 
-class BasePurchaser:
+class BasePurchaser(Generic[SourceT]):
     """Drives one purchase per :meth:`buy` call, launching a fresh persistent
     context each time so no stale checkout state leaks between orders.
 
@@ -273,11 +279,11 @@ class BasePurchaser:
 
     # ─────────── provider hooks (override) ───────────
 
-    def _resolve_url(self, source: object) -> str:
+    def _resolve_url(self, source: SourceT) -> str:
         """The product URL for ``source`` — its own ``url`` or a store fallback."""
         raise NotImplementedError
 
-    def _source_label(self, source: object) -> str:
+    def _source_label(self, source: SourceT) -> str:
         """A short id for log/probe messages, e.g. ``item #1640526``."""
         raise NotImplementedError
 
@@ -393,8 +399,8 @@ class BasePurchaser:
     def buy(
         self,
         item_key: str,
-        item: object,
-        source: object,
+        item: CatalogItem,
+        source: SourceT,
         proceed_check: ProceedCheck,
     ) -> PurchaseResult:
         """Execute (or dry-run) the buy of ``source`` for ``item``.
@@ -408,7 +414,7 @@ class BasePurchaser:
         PWTimeout = api.TimeoutError  # type: ignore[attr-defined]
 
         url = self._resolve_url(source)
-        title = getattr(item, "title", item_key)
+        title = item.title
 
         with api.sync_playwright() as pw:  # type: ignore[attr-defined]
             context = self._launch_context(pw)
@@ -428,7 +434,7 @@ class BasePurchaser:
             submitted = False
             try:
                 resp = page.goto(url, wait_until="domcontentloaded")
-                http_status = getattr(resp, "status", None) if resp is not None else None
+                http_status = resp.status if resp is not None else None
 
                 if self._is_challenge(page):
                     return self._challenge(page, item_key, "product")
@@ -650,7 +656,7 @@ class BasePurchaser:
 
     # ─────────── dump-dom (bring-up) ───────────
 
-    def dump_dom(self, item_key: str, item: object, source: object) -> DumpResult:
+    def dump_dom(self, item_key: str, item: CatalogItem, source: SourceT) -> DumpResult:
         """Open the product page read-only and dump the rendered DOM.
 
         A bring-up aid for confirming the ``# TODO: verify against live DOM``
@@ -892,7 +898,8 @@ class BasePurchaser:
             pass
         if self._click_first(page, self.PLACE_ORDER_SELECTORS):
             return True
-        for role in ("button", "link"):
+        roles: tuple[_ClickRole, ...] = ("button", "link")
+        for role in roles:
             try:
                 page.get_by_role(role, name=name_re).first.click(timeout=5_000)
                 return True
@@ -1012,7 +1019,8 @@ class BasePurchaser:
         body, so without this the screenshot is just the header bar over a blank
         white page. Both waits are bounded and best-effort — the checkout rarely
         goes fully ``networkidle``, so we cap it and shoot whatever we have."""
-        for state in ("load", "networkidle"):
+        states: tuple[Literal["load", "networkidle"], ...] = ("load", "networkidle")
+        for state in states:
             try:
                 page.wait_for_load_state(state, timeout=8_000)
             except Exception:  # noqa: BLE001 — bounded wait; shoot what painted
@@ -1072,7 +1080,7 @@ class BasePurchaser:
             return None
 
 
-class CostcoPurchaser(BasePurchaser):
+class CostcoPurchaser(BasePurchaser[CostcoSource]):
     """Costco — the first store tried for every item."""
 
     PROVIDER = "costco"
@@ -1225,12 +1233,11 @@ class CostcoPurchaser(BasePurchaser):
         re.I,
     )
 
-    def _resolve_url(self, source: object) -> str:
-        url = getattr(source, "url", "") or ""
-        return url or self.config.costco_product_url(getattr(source, "item_number"))
+    def _resolve_url(self, source: CostcoSource) -> str:
+        return source.url or self.config.costco_product_url(source.item_number)
 
-    def _source_label(self, source: object) -> str:
-        return f"item #{getattr(source, 'item_number')}"
+    def _source_label(self, source: CostcoSource) -> str:
+        return f"item #{source.item_number}"
 
     # WebSphere Commerce stamps the signed-in member's numeric user id into the
     # WC_AUTHENTICATION_<id> session cookie; a guest session uses a negative
@@ -1423,7 +1430,7 @@ class CostcoPurchaser(BasePurchaser):
                 continue
 
 
-class AmazonPurchaser(BasePurchaser):
+class AmazonPurchaser(BasePurchaser[AmazonSource]):
     """Amazon — the fallback when Costco can't fulfil an item.
 
     Restored from the pre-costco-switch buy flow (commit 9057046^). The DOM
@@ -1517,12 +1524,11 @@ class AmazonPurchaser(BasePurchaser):
     # Amazon order numbers look like 123-4567890-1234567.
     ORDER_ID_RE = re.compile(r"\b\d{3}-\d{7}-\d{7}\b")
 
-    def _resolve_url(self, source: object) -> str:
-        url = getattr(source, "url", "") or ""
-        return url or self.config.amazon_product_url(getattr(source, "asin"))
+    def _resolve_url(self, source: AmazonSource) -> str:
+        return source.url or self.config.amazon_product_url(source.asin)
 
-    def _source_label(self, source: object) -> str:
-        return f"ASIN {getattr(source, 'asin')}"
+    def _source_label(self, source: AmazonSource) -> str:
+        return f"ASIN {source.asin}"
 
     def _start_checkout(self, page: "Page") -> bool:
         """Click Buy Now; fall back to Add to Cart → Proceed to checkout.
