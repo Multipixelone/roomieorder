@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+# mypy: disable-error-code="arg-type"
+# Test stubs are intentionally duck-typed fakes that implement only the Page
+# subset each test exercises; casting every call site would add noise.
+
 import pytest
 
 from roomieorder.config import Config
