@@ -11,6 +11,12 @@ import pytest
 from roomieorder.config import Config
 from roomieorder.store import Store
 
+# Deliberately NOT the repo's catalog.json. This is a purpose-built fixture
+# covering the two source-shapes the code must handle — a two-source item (Costco
+# + Amazon fallback) and a Costco-only item (no fallback) — so the orchestrator's
+# fallback chain is exercised both ways. The repo catalog.json is itself only a
+# placeholder (the real ~25-item catalog ships in infra/nix-secrets), so there's
+# no single source of truth to converge on; keep this minimal matrix intentional.
 _CATALOG = {
     # Two sources: Costco first, Amazon fallback.
     "paper_towels": {
