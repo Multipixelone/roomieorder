@@ -463,6 +463,27 @@ def test_amazon_start_checkout_clicks_buy_now(config: Config) -> None:
     assert page.clicked == [AmazonPurchaser.BUY_NOW_SELECTORS[0]]
 
 
+# ─────────── order-id extraction ───────────
+
+
+def test_order_id_prefers_labelled_number(config: Config) -> None:
+    # A phone number (10 digits) appears before the order id; the bare regex
+    # would grab it, but the label anchor must pick the real order number.
+    body = "Need help? Call 8007742678.\nOrder # 99887766 placed.\nTotal $24.99"
+    assert _purchaser(config)._find_order_id(body) == "99887766"
+
+
+def test_order_id_handles_label_variants(config: Config) -> None:
+    p = _purchaser(config)
+    assert p._find_order_id("Order Number: 123456789") == "123456789"
+    assert p._find_order_id("Confirmation #123456789") == "123456789"
+
+
+def test_order_id_falls_back_to_bare_regex(config: Config) -> None:
+    # No label on the page → fall back to the bare digit-run regex.
+    assert _purchaser(config)._find_order_id("Thanks! 123456789 is your number") == "123456789"
+
+
 def test_amazon_resolves_dp_url_from_asin(config: Config) -> None:
     class _Src:
         url = ""

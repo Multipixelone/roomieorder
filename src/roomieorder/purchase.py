@@ -242,6 +242,12 @@ class BasePurchaser:
     OUT_OF_STOCK_MARKERS: tuple[str, ...] = ()
     NOT_FOUND_MARKERS: tuple[str, ...] = ()
     ORDER_ID_RE = re.compile(r"\b\d{9,12}\b")
+    # Label-anchored order-id capture, tried *before* the bare ORDER_ID_RE so a
+    # phone number / item number / ZIP+4 elsewhere on the confirmation page can't
+    # be mistaken for the order id (capture group 1 is the id). None when the
+    # store's bare ORDER_ID_RE is already specific enough (e.g. Amazon's dashed
+    # format) to stand on its own.
+    ORDER_ID_LABEL_RE: Optional["re.Pattern[str]"] = None
 
     def __init__(self, config: Config, *, profile_dir: Path, domain: str) -> None:
         self.config = config
@@ -884,10 +890,7 @@ class BasePurchaser:
             body = page.locator("body").inner_text(timeout=5_000)  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             pass
-        order_id = None
-        m = self.ORDER_ID_RE.search(body)
-        if m:
-            order_id = m.group(0)
+        order_id = self._find_order_id(body)
         total = None
         for sel in self.ORDER_TOTAL_SELECTORS:
             try:
@@ -900,6 +903,20 @@ class BasePurchaser:
             except Exception:  # noqa: BLE001
                 continue
         return order_id, total
+
+    def _find_order_id(self, body: str) -> Optional[str]:
+        """Extract the order id from the confirmation body text.
+
+        Prefer the label-anchored ``ORDER_ID_LABEL_RE`` (capture group 1) so a
+        bare digit run elsewhere — a phone number, item number, ZIP+4, a
+        timestamp — can't be mistaken for the order id. Fall back to the store's
+        ``ORDER_ID_RE`` only when no label match is found (or none is defined)."""
+        if self.ORDER_ID_LABEL_RE is not None:
+            m = self.ORDER_ID_LABEL_RE.search(body)
+            if m:
+                return m.group(1)
+        m = self.ORDER_ID_RE.search(body)
+        return m.group(0) if m else None
 
     def _settle(self, page: object) -> None:
         """Let a freshly-navigated page paint before we shoot it.
@@ -1069,9 +1086,17 @@ class CostcoPurchaser(BasePurchaser):
         "page not found",
         "the page you requested cannot be found",
     )
-    # Costco web order numbers — best guess (purely digits, ~10).
-    # TODO(costco): verify against live DOM — confirm order-number format.
+    # Costco web order numbers — best guess (purely digits, ~10). Because a bare
+    # digit run on the confirmation page is ambiguous (phone numbers, item
+    # numbers, ZIP+4 all match), prefer the label-anchored capture below and only
+    # fall back to this when no "Order #"/"Confirmation number" label is found.
+    # TODO(costco): verify against live DOM — confirm order-number format + label.
     ORDER_ID_RE = re.compile(r"\b\d{9,12}\b")
+    # "Order #12345678", "Order Number: 12345678", "Confirmation # 12345678", …
+    ORDER_ID_LABEL_RE = re.compile(
+        r"(?:order|confirmation)\s*(?:number|no\.?|#)?\s*[:#]?\s*(\d{7,12})",
+        re.I,
+    )
 
     def _resolve_url(self, source: object) -> str:
         url = getattr(source, "url", "") or ""
