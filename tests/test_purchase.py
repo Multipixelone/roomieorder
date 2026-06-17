@@ -639,6 +639,28 @@ def test_submitted_unconfirmed_flags_needs_review(config: Config) -> None:
     assert "MAY have been placed" in result.message
 
 
+def test_submitted_unconfirmed_carries_review_total(config: Config) -> None:
+    # The review-page total is logged onto the needs_review row so the human
+    # still sees the amount to split even when the confirmation can't be read.
+    result = _purchaser(config)._submitted_unconfirmed(
+        _ConfirmPage(), "paper_towels", "no total", order_total=27.21
+    )
+    assert result.status == "needs_review"
+    assert result.order_total == 27.21
+
+
+def test_read_total_reads_order_total_selector(config: Config) -> None:
+    # The grand total sits in ORDER_TOTAL_SELECTORS on the review page too — the
+    # same element used on the confirmation page — so one reader serves both.
+    page = _ConfirmPage(total_text="$27.21")
+    assert _purchaser(config)._read_total(page) == 27.21
+
+
+def test_read_total_none_when_absent(config: Config) -> None:
+    # Costco's v2 confirmation page has no total element at all → None.
+    assert _purchaser(config)._read_total(_ConfirmPage(body="Order # 123")) is None
+
+
 def test_amazon_resolves_dp_url_from_asin(config: Config) -> None:
     class _Src:
         url = ""

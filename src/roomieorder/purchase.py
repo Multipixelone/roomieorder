@@ -432,6 +432,10 @@ class BasePurchaser(Generic[SourceT]):
             # invite a re-order of an order that may have gone through); they all
             # route to `needs_review` for a human to confirm.
             submitted = False
+            # The order total only appears on the *review* page — Costco's
+            # CheckoutConfirmationView_v2 shows just an order number — so it's
+            # read there (before Place Order) and carried down to the result.
+            review_total: Optional[float] = None
             try:
                 resp = page.goto(url, wait_until="domcontentloaded")
                 http_status = resp.status if resp is not None else None
@@ -520,14 +524,27 @@ class BasePurchaser(Generic[SourceT]):
                 if self._is_challenge(page):
                     return self._challenge(page, item_key, "checkout")
 
+                # ── read the order total off the review page ──
+                # The confirmation page (Costco's CheckoutConfirmationView_v2)
+                # shows only an order number — no total — so the review page is
+                # the one place the grand total (item + shipping + tax) is on
+                # screen. Read it here, before Place Order, so it lands in the
+                # result (→ Google Sheet, for cost-splitting) even on a dry run,
+                # and stands in when the confirmation scrape finds no total.
+                self._settle(page)
+                review_total = self._read_total(page)
+
                 # ── DRY_RUN stops here ──
                 if self.config.dry_run:
-                    self._settle(page)
                     shot = self._screenshot(page, item_key, "review")
+                    msg = f"[DRY] would order {item_key} at ${price:.2f}"
+                    if review_total is not None:
+                        msg += f" (total ${review_total:.2f})"
                     return PurchaseResult(
                         status="dry_run",
                         unit_price=price,
-                        message=f"[DRY] would order {item_key} at ${price:.2f}",
+                        order_total=review_total,
+                        message=msg,
                         screenshot=shot,
                     )
 
@@ -576,18 +593,27 @@ class BasePurchaser(Generic[SourceT]):
                 order_id, total = self._scrape_confirmation(page)
                 if order_id is None and total is None:
                     # Submitted, but nothing confirmable scraped — don't claim a
-                    # clean `placed` we can't evidence. Flag for human review.
+                    # clean `placed` we can't evidence. Flag for human review,
+                    # carrying the review-page total so the row still logs a
+                    # dollar amount to split.
                     return self._submitted_unconfirmed(
-                        page, item_key, "no order number or total on the confirmation page"
+                        page,
+                        item_key,
+                        "no order number or total on the confirmation page",
+                        order_total=review_total,
                     )
+                # The confirmation page rarely carries a total (Costco's v2 view
+                # shows only the order number), so fall back to the grand total
+                # read off the review page before the click.
+                order_total = total if total is not None else review_total
                 self._screenshot(page, item_key, "confirmation")
                 return PurchaseResult(
                     status="placed",
                     unit_price=price,
-                    order_total=total,
+                    order_total=order_total,
                     order_id=order_id,
                     message=(
-                        f"ordered {title} — ${(total or price):.2f}"
+                        f"ordered {title} — ${(order_total or price):.2f}"
                         + (f" — #{order_id}" if order_id else "")
                     ),
                 )
@@ -595,7 +621,9 @@ class BasePurchaser(Generic[SourceT]):
             except PWTimeout as exc:
                 detail = f"timed out: {exc}".split("\n")[0]
                 if submitted:
-                    return self._submitted_unconfirmed(page, item_key, detail)
+                    return self._submitted_unconfirmed(
+                        page, item_key, detail, order_total=review_total
+                    )
                 shot = self._screenshot(page, item_key, "timeout")
                 return PurchaseResult(status="failed", message=detail, screenshot=shot)
             except _BUG_EXCEPTIONS:
@@ -609,7 +637,9 @@ class BasePurchaser(Generic[SourceT]):
                 _logger.exception("buy flow crashed for %s", item_key)
                 detail = f"buy flow error: {exc}".split("\n")[0]
                 if submitted:
-                    return self._submitted_unconfirmed(page, item_key, detail)
+                    return self._submitted_unconfirmed(
+                        page, item_key, detail, order_total=review_total
+                    )
                 shot = self._screenshot(page, item_key, "crash")
                 return PurchaseResult(status="failed", message=detail, screenshot=shot)
             finally:
@@ -950,17 +980,24 @@ class BasePurchaser(Generic[SourceT]):
         return False
 
     def _submitted_unconfirmed(
-        self, page: "Page", item_key: str, detail: str
+        self,
+        page: "Page",
+        item_key: str,
+        detail: str,
+        order_total: Optional[float] = None,
     ) -> PurchaseResult:
         """Place Order was clicked but we couldn't confirm the result.
 
         The order *may* have gone through, so this never reports ``failed`` (which
         the worker could re-drive into a double order). It returns ``needs_review``
         — a pausing, non-fallback status — so a human checks the store account
-        before anything re-orders the item."""
+        before anything re-orders the item. ``order_total`` (the review-page grand
+        total, when known) is carried onto the row so the human still sees the
+        amount to split even though the confirmation couldn't be scraped."""
         shot = self._screenshot(page, item_key, "submitted_unconfirmed")
         return PurchaseResult(
             status="needs_review",
+            order_total=order_total,
             message=(
                 f"⚠️ {self.STORE_NAME}: Place Order was clicked but the confirmation "
                 f"couldn't be read — the order MAY have been placed. Check the "
@@ -968,6 +1005,24 @@ class BasePurchaser(Generic[SourceT]):
             ),
             screenshot=shot,
         )
+
+    def _read_total(self, page: "Page") -> Optional[float]:
+        """First parseable amount from ``ORDER_TOTAL_SELECTORS``, or None.
+
+        Shared by the review-page read (before Place Order) and the confirmation
+        scrape — the same grand-total element id is used on Costco's
+        SinglePageCheckoutView, so one reader serves both call sites."""
+        for sel in self.ORDER_TOTAL_SELECTORS:
+            try:
+                loc = page.locator(sel).first
+                if loc.count() == 0:
+                    continue
+                total = parse_price(loc.inner_text(timeout=2_000))
+                if total is not None:
+                    return total
+            except Exception:  # noqa: BLE001 — try the next candidate
+                continue
+        return None
 
     def _scrape_confirmation(self, page: "Page") -> tuple[Optional[str], Optional[float]]:
         # Defensive read: the confirmation body can paint a beat after the order
@@ -985,18 +1040,7 @@ class BasePurchaser(Generic[SourceT]):
             if attempt < 2:
                 self._settle(page)
         order_id = self._find_order_id(body)
-        total = None
-        for sel in self.ORDER_TOTAL_SELECTORS:
-            try:
-                loc = page.locator(sel).first
-                if loc.count() == 0:
-                    continue
-                total = parse_price(loc.inner_text(timeout=2_000))
-                if total is not None:
-                    break
-            except Exception:  # noqa: BLE001
-                continue
-        return order_id, total
+        return order_id, self._read_total(page)
 
     def _find_order_id(self, body: str) -> Optional[str]:
         """Extract the order id from the confirmation body text.

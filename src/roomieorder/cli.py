@@ -245,11 +245,12 @@ def dry_run(item_key: str, provider: str) -> None:
 
     click.echo(f"dry-run {item_key} ({provider}) → {purchaser._resolve_url(source)}")  # type: ignore[attr-defined]
     result = purchaser.buy(item_key, item, source, proceed_check)  # type: ignore[attr-defined]
-    click.echo(f"status:     {result.status}")
-    click.echo(f"unit_price: {result.unit_price}")
-    click.echo(f"message:    {result.message}")
+    click.echo(f"status:      {result.status}")
+    click.echo(f"unit_price:  {result.unit_price}")
+    click.echo(f"order_total: {result.order_total}")
+    click.echo(f"message:     {result.message}")
     if result.screenshot:
-        click.echo(f"screenshot: {result.screenshot}")
+        click.echo(f"screenshot:  {result.screenshot}")
     store.close()
 
 
