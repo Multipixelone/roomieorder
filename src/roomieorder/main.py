@@ -24,7 +24,7 @@ from typing import AsyncIterator, Optional
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
-from roomieorder.catalog import Catalog, CatalogItem, load_catalog
+from roomieorder.catalog import Catalog, CatalogError, CatalogItem, load_catalog
 from roomieorder.config import Config, load_config
 from roomieorder.guards import check_intake
 from roomieorder.notify import Notifier, build_notifier
@@ -210,6 +210,18 @@ class Engine:
         self.notifier.send(reason)
         _logger.warning("worker paused: %s", reason)
 
+    def reload_catalog(self) -> list[str]:
+        """Re-read the catalog from disk so edits land without a service restart.
+
+        The catalog is otherwise captured once at boot. Swaps ``self.catalog``
+        only on a clean parse, so a malformed edit raises (surfaced as a 400 by
+        the endpoint) and leaves the running catalog untouched. Returns the new
+        item keys."""
+        new_catalog = load_catalog(self.config.catalog_path)
+        self.catalog = new_catalog
+        _logger.info("catalog reloaded: %d items", len(new_catalog))
+        return sorted(new_catalog)
+
     # ─────────── dashboard state ───────────
 
     def item_statuses(self, *, now: Optional[datetime] = None) -> dict[str, ItemStatus]:
@@ -326,5 +338,18 @@ def create_app(config: Optional[Config] = None) -> FastAPI:
 
         row_id = engine.store.enqueue(req.item_key, req.requester)
         return {"accepted": True, "row_id": row_id, "item_key": req.item_key}
+
+    @app.post("/reload")
+    def reload(
+        x_roomieorder_token: Optional[str] = Header(default=None),
+    ) -> dict[str, object]:
+        engine: Engine = app.state.engine
+        _require_token(engine.config, x_roomieorder_token)
+        try:
+            items = engine.reload_catalog()
+        except CatalogError as exc:
+            # Bad edit — the running catalog is untouched; report and keep serving.
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"reloaded": True, "items": items}
 
     return app

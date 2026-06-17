@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -160,6 +161,35 @@ def test_startup_recovers_orphaned_in_progress(config: Config, monkeypatch: pyte
         rows = c.get("/queue").json()
         orphan = next(r for r in rows if r["id"] == rid)
         assert orphan["status"] == "failed"
+
+
+def test_reload_picks_up_catalog_edits(client: TestClient, catalog_path: Path) -> None:
+    import json
+
+    before = client.get("/health").json()["items"]
+    assert "cocoa" not in before
+
+    data = json.loads(catalog_path.read_text())
+    data["cocoa"] = {
+        "title": "Hot Cocoa",
+        "qty": 1,
+        "cooldown_days": 0,
+        "costco": {"item_number": "9999999", "expected_price": 8.0, "price_ceiling": 12.0},
+    }
+    catalog_path.write_text(json.dumps(data))
+
+    r = client.post("/reload")
+    assert r.status_code == 200
+    assert "cocoa" in r.json()["items"]
+    assert "cocoa" in client.get("/health").json()["items"]
+
+
+def test_reload_rejects_bad_catalog(client: TestClient, catalog_path: Path) -> None:
+    catalog_path.write_text("{ not valid json")
+    r = client.post("/reload")
+    assert r.status_code == 400
+    # The running catalog is untouched — the bad edit didn't take.
+    assert "paper_towels" in client.get("/health").json()["items"]
 
 
 def test_worker_pauses_when_recorded_spend_breaches_cap(
