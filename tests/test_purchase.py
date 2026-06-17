@@ -16,9 +16,7 @@ from roomieorder.purchase import (
 _PRICE_SELECTORS = CostcoPurchaser.PRICE_SELECTORS
 _PRICE_META_SELECTORS = CostcoPurchaser.PRICE_META_SELECTORS
 _PLACE_ORDER_SELECTORS = CostcoPurchaser.PLACE_ORDER_SELECTORS
-_SIGNIN_SUBMIT_SELECTORS = CostcoPurchaser.SIGNIN_SUBMIT_SELECTORS
 _ADD_TO_CART_SELECTORS = CostcoPurchaser.ADD_TO_CART_SELECTORS
-_ACCOUNT_NAV = CostcoPurchaser.ACCOUNT_NAV_SELECTORS[0]
 
 
 def _purchaser(config: Config) -> CostcoPurchaser:
@@ -301,6 +299,18 @@ def test_probe_selectors_reports_matches_and_misses(config: Config) -> None:
     assert "title: Kirkland Signature Bath Tissue" in report
 
 
+class _FakeContext:
+    """Stand-in for the BrowserContext cookie jar. WebSphere Commerce stamps the
+    signed-in member's id into WC_AUTHENTICATION_<id>; a guest uses -1002."""
+
+    def __init__(self, page: "_LoginPage") -> None:
+        self._page = page
+
+    def cookies(self) -> list[dict[str, str]]:
+        uid = "2436747244" if self._page.logged_in else "-1002"
+        return [{"name": f"WC_AUTHENTICATION_{uid}", "value": "x"}]
+
+
 class _LoginLocator:
     def __init__(self, page: "_LoginPage", selector: str) -> None:
         self._page = page
@@ -314,70 +324,58 @@ class _LoginLocator:
         return 1 if self._selector in self._page.present else 0
 
     def inner_text(self, timeout: int | None = None) -> str:
-        # Costco's account nav reads the login state.
-        return "Hello, Finn" if self._page.logged_in else "Sign In / Register"
-
-    def click(self, timeout: int | None = None) -> None:
-        self._page.clicked.append(self._selector)
-        # Submitting the prefilled logon form establishes the session.
-        if self._selector in _SIGNIN_SUBMIT_SELECTORS:
-            self._page.logged_in = True
-
-
-class _LoginRole:
-    """No role/text match — forces ensure_logged_in onto its selector backstops."""
-
-    @property
-    def first(self) -> "_LoginRole":
-        return self
-
-    def click(self, timeout: int | None = None) -> None:
-        raise TimeoutError("no role match")
+        # The DOM backstop: the member "Account" button vs the guest sign-in link.
+        return "Account" if self._page.logged_in else "Sign In or Register"
 
 
 class _LoginPage:
-    """Models the cached-credential sign-in: starts logged out and the account
-    nav flips to a name once the prefilled logon form's submit is clicked."""
+    """Models Costco's silent SSO re-auth: a fresh launch starts as a guest
+    (WC_AUTHENTICATION_-1002), and hitting the logon form upgrades the WC cookie
+    to the member's id — unless the saved SSO cookie has also expired
+    (``reauth_succeeds=False``), in which case it stays a guest."""
 
-    def __init__(self, *, logged_in: bool, present: set[str] | None = None) -> None:
+    def __init__(
+        self, *, logged_in: bool, present: set[str] | None = None, reauth_succeeds: bool = True
+    ) -> None:
         self.logged_in = logged_in
         self.present = present or set()
-        self.clicked: list[str] = []
+        self.reauth_succeeds = reauth_succeeds
         self.goto_urls: list[str] = []
+        self.context = _FakeContext(self)
 
     def locator(self, selector: str) -> _LoginLocator:
         return _LoginLocator(self, selector)
 
-    def get_by_role(self, role: str, name: object = None) -> _LoginRole:
-        return _LoginRole()
-
     def goto(self, url: str, wait_until: str | None = None) -> None:
         self.goto_urls.append(url)
+        if "LogonForm" in url and self.reauth_succeeds:
+            self.logged_in = True
 
     def wait_for_load_state(self, state: str, timeout: int | None = None) -> None:
         pass
 
 
 def test_ensure_logged_in_short_circuits_when_already_logged_in(config: Config) -> None:
-    page = _LoginPage(logged_in=True, present={_ACCOUNT_NAV})
+    page = _LoginPage(logged_in=True)
     assert _purchaser(config).ensure_logged_in(page) is True
-    assert page.clicked == []
+    # Already a member session — no logon navigation needed.
     assert page.goto_urls == []
 
 
-def test_ensure_logged_in_clicks_cached_credential_submit(config: Config) -> None:
-    # Logged out, but the prefilled logon form's submit is in the DOM.
-    page = _LoginPage(logged_in=False, present={_ACCOUNT_NAV, _SIGNIN_SUBMIT_SELECTORS[0]})
+def test_ensure_logged_in_silent_sso_reauth(config: Config) -> None:
+    # Fresh launch lands as a guest, but the saved SSO cookie re-auths silently.
+    page = _LoginPage(logged_in=False, reauth_succeeds=True)
     assert _purchaser(config).ensure_logged_in(page) is True
-    # Reached the logon page (role link missed) and clicked the form's submit.
-    assert any("logon" in u for u in page.goto_urls)
-    assert _SIGNIN_SUBMIT_SELECTORS[0] in page.clicked
+    # Reached the logon flow, which bounced back as the member.
+    assert any("LogonForm" in u for u in page.goto_urls)
 
 
-def test_ensure_logged_in_fails_when_submit_never_takes(config: Config) -> None:
-    # Logged out and nothing to click — the caller must bail with manual login.
-    page = _LoginPage(logged_in=False, present={_ACCOUNT_NAV})
+def test_ensure_logged_in_fails_when_sso_expired(config: Config) -> None:
+    # Guest, and the SSO cookie has also expired so the logon form can't re-auth
+    # on its own — the caller must bail to manual `roomieorder login`.
+    page = _LoginPage(logged_in=False, reauth_succeeds=False)
     assert _purchaser(config).ensure_logged_in(page) is False
+    assert any("LogonForm" in u for u in page.goto_urls)
 
 
 # ─────────── availability (drives the Amazon fallback) ───────────

@@ -1010,19 +1010,23 @@ class CostcoPurchaser(BasePurchaser):
         ".order-total .value",
         ".grand-total .value",
     )
-    # The remembered-credential logon form's submit control (see ensure_logged_in).
-    # TODO(costco): verify against live DOM — logon submit control.
+    # Legacy logon-form submit control. No longer used by the buy flow: Costco's
+    # re-auth is a silent SSO redirect (see ensure_logged_in), not a typed form,
+    # so there's no submit button to click. Kept only for the dump-dom probe.
     SIGNIN_SUBMIT_SELECTORS = (
         "[automation-id='signInButton']",
         "input#sign-in-btn",
         "button#sign-in-btn",
         "button[type='submit']",
     )
-    # TODO(costco): verify against live DOM — account-nav selector + wording.
+    # Verified against live DOM 2026-06-17: the header renders an "Account"
+    # member-links button ONLY for an authenticated session (count=0 for a
+    # guest), so its presence is a logged-in tell. The base text check reads
+    # "Account" (no "sign in"/"register") → True when present, False when the
+    # selector is absent. Used as the DOM backstop to the cookie check below.
     ACCOUNT_NAV_SELECTORS = (
-        "[automation-id='accountMenuButton']",
-        "#header-user",
-        ".sign-in-link",
+        "[data-testid='icon-links-member-links-desktop-account']",
+        "[data-testid='search-strip-member-links-desktop-account']",
     )
     # Costco/Akamai bot wall. TODO(costco): verify against live DOM.
     CHALLENGE_MARKERS = (
@@ -1070,36 +1074,55 @@ class CostcoPurchaser(BasePurchaser):
     def _source_label(self, source: object) -> str:
         return f"item #{getattr(source, 'item_number')}"
 
+    # WebSphere Commerce stamps the signed-in member's numeric user id into the
+    # WC_AUTHENTICATION_<id> session cookie; a guest session uses a negative
+    # sentinel id (seen live as -1002). So an authenticated session is exactly a
+    # WC_AUTHENTICATION cookie whose id is a positive integer — a signal immune to
+    # the header's React hydration timing, since the cookie is set on the
+    # navigation response before the nav paints. Verified live 2026-06-17: guest
+    # WC_AUTHENTICATION_-1002 vs member WC_AUTHENTICATION_2436747244.
+    _WC_AUTH_COOKIE_RE = re.compile(r"^WC_AUTHENTICATION_\d+$")
+
+    def is_logged_in(self, page: object) -> bool:
+        """True when the WC session cookie carries a real (positive) member id.
+
+        Costco's session cookie is the reliable signal: the header keeps both the
+        signed-in and signed-out menus in the DOM (toggled by CSS) and hydrates
+        the member "Account" button late, so reading nav text misfires. The
+        cookie is correct the instant the page loads. Falls back to the
+        account-button DOM check (ACCOUNT_NAV_SELECTORS) if the jar can't be read.
+        """
+        try:
+            cookies = page.context.cookies()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — fall back to the DOM signal
+            cookies = []
+        for cookie in cookies:
+            if self._WC_AUTH_COOKIE_RE.match(cookie.get("name", "")):
+                return True
+        return super().is_logged_in(page)
+
     def ensure_logged_in(self, page: object) -> bool:
-        """Drive Costco's cached-credential sign-in if the profile is logged out.
+        """Re-establish Costco's member session, silently, from the saved profile.
 
-        Costco remembers the email *and* password in the persistent profile, but
-        does not treat a remembered profile as authenticated until the Sign In
-        button is clicked — a session that "has the cookies" still starts logged
-        out. So when `is_logged_in` reads logged-out, open the logon page via the
-        header "Sign In / Register" link, let the form prefill, and click its Sign
-        In submit. Stores no credential — the click only submits what the browser
-        already filled.
+        Costco drops its WC_AUTHENTICATION *session* cookie on every fresh browser
+        launch, so each run starts as a guest even though the profile still holds
+        a live identity-provider (Azure AD B2C) SSO cookie. Hitting the logon form
+        while that SSO cookie is valid bounces straight back to the storefront
+        with a ``krypto`` ticket that upgrades the guest WC session to the
+        member's — no credential form is shown and nothing is typed. When the SSO
+        cookie has *also* expired the logon form actually appears and this stays
+        logged out, so the caller bails to the manual `roomieorder login` path.
 
-        Returns True if logged in (already, or after the click), False if the
-        click sequence didn't take (caller bails with the manual-login message).
-        TODO(costco): verify against live DOM — sign-in link + logon submit."""
+        Returns True if logged in (already, or after the silent re-auth)."""
         if self.is_logged_in(page):
             return True
-        # Reach the logon form: the header link first, the logon URL as backstop.
-        if not self._click_by_role(page, ("link", "button"), "sign in"):
-            try:
-                page.goto(  # type: ignore[attr-defined]
-                    f"https://www.{self.domain}/logon",
-                    wait_until="domcontentloaded",
-                )
-            except Exception:  # noqa: BLE001 — no way to reach the form; give up
-                return False
-        self._settle(page)
-        # Submit the prefilled form. Prefer the form's own submit control over a
-        # role/text match so we don't re-click the header "Sign In" link.
-        if not self._click_first(page, self.SIGNIN_SUBMIT_SELECTORS):
-            self._click_by_role(page, ("button",), "sign in")
+        try:
+            page.goto(  # type: ignore[attr-defined]
+                f"https://www.{self.domain}/LogonForm?langId=-1&storeId=10301&catalogId=10701",
+                wait_until="domcontentloaded",
+            )
+        except Exception:  # noqa: BLE001 — couldn't reach the logon flow; give up
+            return False
         self._settle(page)
         return self.is_logged_in(page)
 
