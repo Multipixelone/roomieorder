@@ -125,9 +125,13 @@ def parse_price(text: str) -> Optional[float]:
     """Pull the first currency value out of a price blob, or None.
 
     Handles both US grouping (``$1,234.56``) and European decimal-comma
-    (``€11,99``) by treating the *last* ``.``/``,`` as the decimal point and
-    dropping every other separator as grouping. Both stores show cents, so the
-    trailing group is the fraction.
+    (``€11,99``) by treating the *last* ``.``/``,`` as the decimal point — but
+    only when it actually looks like a fraction. A trailing separator followed by
+    exactly three digits (``$1,234``, ``$1,000``) is a *thousands group*, not
+    cents: reading it as a decimal turns ``$1,000`` into ``1.0`` and sails the
+    item under every price ceiling, which is the dangerous direction. So we only
+    split on the last separator when its trailing run is 1, 2, or 4+ digits (real
+    fractions); a lone 3-digit tail is grouping and the whole number is integral.
 
     Costco's React PDP splits the price across separate ``<span>``s — whole,
     dot, decimal — so the element's ``inner_text`` comes back as ``"$ 27 . 39"``
@@ -140,12 +144,14 @@ def parse_price(text: str) -> Optional[float]:
         return None
     num = m.group(0)
     last_sep = max(num.rfind("."), num.rfind(","))
-    if last_sep == -1:
-        whole = num
+    tail = num[last_sep + 1 :] if last_sep != -1 else ""
+    # A 3-digit tail is a thousands group, not cents → no decimal split.
+    if last_sep == -1 or len(tail) == 3:
+        whole = re.sub(r"[.,]", "", num)
         frac = ""
     else:
         whole = re.sub(r"[.,]", "", num[:last_sep])
-        frac = num[last_sep + 1 :]
+        frac = tail
     try:
         return float(f"{whole}.{frac}") if frac else float(whole)
     except ValueError:

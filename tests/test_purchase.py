@@ -42,6 +42,13 @@ def _amazon(config: Config) -> AmazonPurchaser:
         ("Price: $1,234.56", 1234.56),
         ("£9.50 each", 9.50),
         ("€11,99", 11.99),
+        # Grouped whole-dollar prices: a 3-digit tail is a thousands group, not
+        # cents. Reading these as decimals (1.234 / 1.0) defeats the price
+        # ceiling, so they must parse as the real four-figure amount.
+        ("$1,234", 1234.0),
+        ("$1,000", 1000.0),
+        ("$2,000.00", 2000.0),
+        ("€1.000", 1000.0),
         ("free shipping", None),
         ("", None),
     ],
