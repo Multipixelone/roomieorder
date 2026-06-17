@@ -27,6 +27,16 @@ def test_claim_empty_returns_none(store: Store) -> None:
     assert store.claim_next_pending() is None
 
 
+def test_claim_respects_attempts_cap(store: Store) -> None:
+    # A row that's already been claimed up to MAX_ATTEMPTS (1) and bounced back
+    # to pending must not be re-claimed — it's left for recovery to fail.
+    rid = store.enqueue("paper_towels")
+    first = store.claim_next_pending()
+    assert first is not None and first.attempts == 1
+    store.mark(rid, "pending")  # simulate a requeue
+    assert store.claim_next_pending() is None
+
+
 def test_fifo_order(store: Store) -> None:
     a = store.enqueue("paper_towels")
     b = store.enqueue("dish_soap")

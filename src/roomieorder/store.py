@@ -38,6 +38,12 @@ Status = Literal[
 # Statuses that represent a real, completed money movement for spend accounting.
 SPEND_STATUSES = ("placed",)
 
+# How many times a row may be claimed before it's treated as exhausted. The buy
+# is a money-moving step that may have *already placed* an order when it died, so
+# the safe policy is one attempt: never auto-retry a row that reached the worker,
+# hand it to the operator instead (see ``recover_stale`` and ``claim_next_pending``).
+MAX_ATTEMPTS = 1
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -159,21 +165,24 @@ class Store:
     def claim_next_pending(self) -> Optional[QueueRow]:
         """Atomically take the oldest pending row, flipping it to in_progress.
 
-        Returns None when the queue is empty. The UPDATE…RETURNING is a single
-        statement so two workers (or a restart mid-drain) can't claim the same
-        row twice.
+        Returns None when the queue is empty (or every pending row has already
+        exhausted ``MAX_ATTEMPTS``). The UPDATE…RETURNING is a single statement so
+        two workers (or a restart mid-drain) can't claim the same row twice. The
+        ``attempts < MAX_ATTEMPTS`` guard enforces the retry cap: a row that's
+        been claimed up to the cap is left for ``recover_stale`` to fail rather
+        than re-run a possibly-placed order.
         """
         with self._lock:
             cur = self._conn.execute(
                 """
                 UPDATE queue SET status='in_progress', updated_at=?, attempts=attempts+1
                 WHERE id = (
-                    SELECT id FROM queue WHERE status='pending'
+                    SELECT id FROM queue WHERE status='pending' AND attempts < ?
                     ORDER BY created_at ASC LIMIT 1
                 )
                 RETURNING *
                 """,
-                (_iso(_utcnow()),),
+                (_iso(_utcnow()), MAX_ATTEMPTS),
             )
             row = cur.fetchone()
             self._conn.commit()
