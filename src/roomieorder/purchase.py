@@ -409,6 +409,11 @@ class BasePurchaser:
                 page.bring_to_front()
             except Exception:  # noqa: BLE001 — purely an optimisation
                 pass
+            # Flips True the instant Place Order is clicked — the point of no
+            # return. Past it, *no* failure path may report `failed` (which would
+            # invite a re-order of an order that may have gone through); they all
+            # route to `needs_review` for a human to confirm.
+            submitted = False
             try:
                 resp = page.goto(url, wait_until="domcontentloaded")
                 http_status = getattr(resp, "status", None) if resp is not None else None
@@ -531,6 +536,9 @@ class BasePurchaser:
                         ),
                         screenshot=shot,
                     )
+                # The click landed: from here a scrape miss / timeout / crash
+                # must not read as `failed`.
+                submitted = True
 
                 page.wait_for_load_state("domcontentloaded")
                 if self._is_signin(page):
@@ -540,6 +548,12 @@ class BasePurchaser:
 
                 self._settle(page)
                 order_id, total = self._scrape_confirmation(page)
+                if order_id is None and total is None:
+                    # Submitted, but nothing confirmable scraped — don't claim a
+                    # clean `placed` we can't evidence. Flag for human review.
+                    return self._submitted_unconfirmed(
+                        page, item_key, "no order number or total on the confirmation page"
+                    )
                 self._screenshot(page, item_key, "confirmation")
                 return PurchaseResult(
                     status="placed",
@@ -553,12 +567,11 @@ class BasePurchaser:
                 )
 
             except PWTimeout as exc:
+                detail = f"timed out: {exc}".split("\n")[0]
+                if submitted:
+                    return self._submitted_unconfirmed(page, item_key, detail)
                 shot = self._screenshot(page, item_key, "timeout")
-                return PurchaseResult(
-                    status="failed",
-                    message=f"timed out: {exc}".split("\n")[0],
-                    screenshot=shot,
-                )
+                return PurchaseResult(status="failed", message=detail, screenshot=shot)
             except _BUG_EXCEPTIONS:
                 # A programmer error (bad attr/type/name, missing override, …).
                 # Screenshot for context, then re-raise so it can't hide as
@@ -568,12 +581,11 @@ class BasePurchaser:
                 raise
             except Exception as exc:  # noqa: BLE001 — convert any flake to a safe result
                 _logger.exception("buy flow crashed for %s", item_key)
+                detail = f"buy flow error: {exc}".split("\n")[0]
+                if submitted:
+                    return self._submitted_unconfirmed(page, item_key, detail)
                 shot = self._screenshot(page, item_key, "crash")
-                return PurchaseResult(
-                    status="failed",
-                    message=f"buy flow error: {exc}".split("\n")[0],
-                    screenshot=shot,
-                )
+                return PurchaseResult(status="failed", message=detail, screenshot=shot)
             finally:
                 context.close()
 
@@ -908,12 +920,41 @@ class BasePurchaser:
                 continue
         return False
 
+    def _submitted_unconfirmed(
+        self, page: object, item_key: str, detail: str
+    ) -> PurchaseResult:
+        """Place Order was clicked but we couldn't confirm the result.
+
+        The order *may* have gone through, so this never reports ``failed`` (which
+        the worker could re-drive into a double order). It returns ``needs_review``
+        — a pausing, non-fallback status — so a human checks the store account
+        before anything re-orders the item."""
+        shot = self._screenshot(page, item_key, "submitted_unconfirmed")
+        return PurchaseResult(
+            status="needs_review",
+            message=(
+                f"⚠️ {self.STORE_NAME}: Place Order was clicked but the confirmation "
+                f"couldn't be read — the order MAY have been placed. Check the "
+                f"{self.STORE_NAME} account before re-ordering ({detail})"
+            ),
+            screenshot=shot,
+        )
+
     def _scrape_confirmation(self, page: object) -> tuple[Optional[str], Optional[float]]:
+        # Defensive read: the confirmation body can paint a beat after the order
+        # POST returns, so a single read can miss it. Retry a few times before
+        # giving up — a missed scrape here is what makes a placed order look
+        # unconfirmed (see _submitted_unconfirmed).
         body = ""
-        try:
-            body = page.locator("body").inner_text(timeout=5_000)  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001
-            pass
+        for attempt in range(3):
+            try:
+                body = page.locator("body").inner_text(timeout=5_000)  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                body = ""
+            if self._find_order_id(body) is not None:
+                break
+            if attempt < 2:
+                self._settle(page)
         order_id = self._find_order_id(body)
         total = None
         for sel in self.ORDER_TOTAL_SELECTORS:

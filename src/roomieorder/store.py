@@ -32,6 +32,10 @@ Status = Literal[
     # leg this triggers the Amazon fallback; on the last provider it's terminal.
     "unavailable",
     "failed",
+    # Place Order was clicked but the confirmation couldn't be read, so the order
+    # *may* have gone through. Never auto-retried (that risks a double order) —
+    # the worker pauses and a human confirms against the store account.
+    "needs_review",
     "challenge",
 ]
 

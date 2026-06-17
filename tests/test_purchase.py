@@ -484,6 +484,63 @@ def test_order_id_falls_back_to_bare_regex(config: Config) -> None:
     assert _purchaser(config)._find_order_id("Thanks! 123456789 is your number") == "123456789"
 
 
+# ─────────── confirmation scrape / submitted-but-unconfirmed ───────────
+
+
+class _ConfirmLocator:
+    def __init__(self, *, text: str = "", count: int = 1) -> None:
+        self._text = text
+        self._count = count
+
+    @property
+    def first(self) -> "_ConfirmLocator":
+        return self
+
+    def count(self) -> int:
+        return self._count
+
+    def inner_text(self, timeout: int | None = None) -> str:
+        return self._text
+
+
+class _ConfirmPage:
+    """Models an order-confirmation page: a body blob plus an optional grand-total
+    element. Missing selectors report count=0 like a real locator miss."""
+
+    def __init__(self, *, body: str = "", total_text: str | None = None) -> None:
+        self._body = body
+        self._total_text = total_text
+
+    def locator(self, selector: str) -> _ConfirmLocator:
+        if selector == "body":
+            return _ConfirmLocator(text=self._body, count=1)
+        if self._total_text is not None and selector in CostcoPurchaser.ORDER_TOTAL_SELECTORS:
+            return _ConfirmLocator(text=self._total_text, count=1)
+        return _ConfirmLocator(count=0)
+
+    def wait_for_load_state(self, state: str, timeout: int | None = None) -> None:
+        pass
+
+
+def test_scrape_confirmation_reads_labelled_id_and_total(config: Config) -> None:
+    page = _ConfirmPage(body="Thanks! Order # 123456789 confirmed", total_text="$24.99")
+    order_id, total = _purchaser(config)._scrape_confirmation(page)
+    assert order_id == "123456789"
+    assert total == 24.99
+
+
+def test_scrape_confirmation_returns_none_when_blank(config: Config) -> None:
+    order_id, total = _purchaser(config)._scrape_confirmation(_ConfirmPage(body="loading…"))
+    assert order_id is None and total is None
+
+
+def test_submitted_unconfirmed_flags_needs_review(config: Config) -> None:
+    # Place Order clicked but nothing confirmable scraped → never `failed`.
+    result = _purchaser(config)._submitted_unconfirmed(_ConfirmPage(), "paper_towels", "no total")
+    assert result.status == "needs_review"
+    assert "MAY have been placed" in result.message
+
+
 def test_amazon_resolves_dp_url_from_asin(config: Config) -> None:
     class _Src:
         url = ""
