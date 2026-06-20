@@ -38,6 +38,10 @@ Intake is always-on; execution needs a live graphical session. Requests sit in t
 - [`login --provider costco|amazon`](./src/roomieorder/cli.py) — open a store's profile to sign in by hand (one profile per store)
 - [`dry-run ITEM_KEY --provider costco|amazon`](./src/roomieorder/cli.py) — navigate one store to checkout and screenshot without placing the order
 - [`dump-dom ITEM_KEY --provider costco|amazon`](./src/roomieorder/cli.py) — read-only DOM + selector probe for bring-up
+- [`verify-selectors [ITEM_KEY] --provider costco|amazon`](./src/roomieorder/cli.py) — probe live product pages and report PASS/MISS per item for the price + add-to-cart selectors (operator-run; hits the store, never orders)
+- [`doctor`](./src/roomieorder/cli.py) — one-shot, read-only health check of config, Chrome, the graphical session, per-store profiles, the DB/queue, and the catalog
+- [`failures [--limit N]`](./src/roomieorder/cli.py) — list recent failed/blocked orders with their notes and the newest screenshots to open
+- [`retry ROW_ID [--resume]`](./src/roomieorder/cli.py) — re-enqueue a failed row (refuses rows that may already have placed an order)
 
 ## Configuration
 

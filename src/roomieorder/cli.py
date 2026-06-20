@@ -11,13 +11,21 @@ Subcommands:
 * ``login``        — open the profile headed to sign into Costco by hand.
 * ``dry-run KEY`` — drive one item to its review page and screenshot, no order.
 * ``dump-dom KEY`` — read-only DOM dump + selector probe for bring-up.
+* ``verify-selectors`` — probe live pages for stale buy-flow selectors.
+* ``doctor``      — one-shot, read-only health check of every subsystem.
+* ``failures``    — list recent failed/blocked orders and their screenshots.
+* ``retry ID``    — re-enqueue a failed row for another attempt.
 * ``resume`` / ``pause`` / ``status`` — manage the worker-pause flag.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import re
+import shutil
 from datetime import datetime, timezone
+from typing import Optional
 
 import click
 
@@ -283,6 +291,289 @@ def dump_dom(item_key: str, provider: str) -> None:
     click.echo(f"screenshot: {result.screenshot}")
     click.echo("")
     click.echo(result.summary)
+
+
+# Statuses that mean an order didn't cleanly place — what `failures` surfaces.
+_TROUBLE_STATUSES = (
+    "failed",
+    "needs_review",
+    "challenge",
+    "spend_capped",
+    "price_blocked",
+    "unavailable",
+)
+
+# Selector groups checkable on the *product page* (where dump-dom stops). The
+# place-order/order-total groups only render at checkout/confirmation, so
+# verify-selectors can't reach them — see purchase.BasePurchaser._probe_groups.
+_PRODUCT_PAGE_GROUPS = ("price", "price-meta", "add-to-cart", "buy-now")
+
+_COUNT_RE = re.compile(r"count=(\d+)")
+_READ_PRICE_RE = re.compile(r"^read_price:\s*(.+)$")
+
+
+def _group_hits(summary: str) -> dict[str, bool]:
+    """Parse a ``_probe_selectors`` summary into ``{group: any_selector_matched}``.
+
+    A group ``[name]`` is a hit when at least one of its candidate selectors
+    resolved to ``count>0`` on the live page; a miss when every guess was
+    ``count=0``. Pure string parsing so it's unit-testable without a browser.
+    """
+    hits: dict[str, bool] = {}
+    current: Optional[str] = None
+    for raw in summary.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1]
+            hits.setdefault(current, False)
+            continue
+        if current is not None:
+            match = _COUNT_RE.search(line)
+            if match and int(match.group(1)) > 0:
+                hits[current] = True
+    return hits
+
+
+def _read_price_from_summary(summary: str) -> Optional[str]:
+    """Pull the resolved ``read_price`` line out of a probe summary, or None."""
+    for raw in summary.splitlines():
+        match = _READ_PRICE_RE.match(raw.strip())
+        if match:
+            value = match.group(1).strip()
+            return None if value == "None" else value
+    return None
+
+
+@main.command(name="verify-selectors")
+@click.argument("item_key", required=False)
+@_PROVIDER_OPT
+def verify_selectors(item_key: Optional[str], provider: str) -> None:
+    """Probe live product pages and report which buy-flow selectors still match.
+
+    Opens each item's product page read-only — the same footprint as
+    ``dump-dom`` (reuses the logged-in profile, never adds to cart or orders) —
+    and reports PASS/MISS per item for the selectors reachable on a product
+    page: the price (visible CSS, meta tags, or JSON-LD) and add-to-cart. The
+    place-order/order-total selectors only exist at checkout, so they're out of
+    scope here. Hits live store pages, so this is operator-run and intentionally
+    not part of CI. With no ITEM_KEY, checks every item that declares a
+    ``--provider`` source.
+    """
+    config = load_config()
+    items = load_catalog(config.catalog_path)
+
+    if item_key is not None:
+        if item_key not in items:
+            raise click.ClickException(
+                f"unknown item_key: {item_key} (have: {', '.join(items)})"
+            )
+        targets = {item_key: items[item_key]}
+    else:
+        targets = {
+            key: item
+            for key, item in items.items()
+            if (item.amazon if provider == "amazon" else item.costco) is not None
+        }
+    if not targets:
+        raise click.ClickException(f"no items declare a {provider} source")
+
+    purchaser = _purchaser_for(config, provider)
+    any_miss = False
+    for key, item in targets.items():
+        source = _source_for(item, provider)
+        result = purchaser.dump_dom(key, item, source)  # type: ignore[attr-defined]
+        hits = _group_hits(result.summary)
+        price = _read_price_from_summary(result.summary)
+        cart_group = "buy-now" if provider == "amazon" else "add-to-cart"
+        cart_ok = hits.get(cart_group, False) or hits.get("add-to-cart", False)
+        price_ok = price is not None or hits.get("price", False) or hits.get("price-meta", False)
+
+        if result.challenge:
+            verdict = "CHALLENGE (can't verify — blocked)"
+        elif not result.logged_in and not price_ok:
+            verdict = "LOGGED-OUT (sign in, then retry)"
+        elif price_ok and cart_ok:
+            verdict = "PASS"
+        else:
+            verdict = "MISS"
+            any_miss = True
+
+        click.echo(
+            f"{key:18} price={price or '-':>8}  add-to-cart="
+            f"{'ok' if cart_ok else 'MISS':<4}  logged_in={result.logged_in}  → {verdict}"
+        )
+        if result.probe:
+            click.echo(f"{'':18} probe: {result.probe}")
+        if result.html:
+            click.echo(f"{'':18} dom:   {result.html}")
+
+    if any_miss:
+        click.echo("")
+        click.echo("Some selectors missed — Read the dom/probe artifacts above to find the live ones.")
+        raise SystemExit(1)
+
+
+@main.command()
+def doctor() -> None:
+    """Print a one-shot, read-only health check of every subsystem.
+
+    Never launches a browser or touches a store, so it's safe and instant.
+    Reports config/anti-bot, the graphical session the worker needs, the
+    per-store profiles, the DB/queue, and the catalog. Exits non-zero when a
+    hard check fails (a pinned Chrome that doesn't exist, an unopenable DB, an
+    unparseable catalog), so it doubles as a smoke test.
+    """
+    config = load_config()
+    hard_fail = False
+
+    def line(state: str, label: str, detail: str) -> None:
+        click.echo(f"{state:4} {label:14} {detail}")
+
+    # ── config / safety ──
+    line("ok", "dry_run", str(config.dry_run))
+    line("ok", "daily_cap", f"${config.daily_cap:.2f}")
+    line("ok", "intake", f"{config.host}:{config.port}  token={'set' if config.intake_token else 'none'}")
+    line(
+        "ok" if config.sheets_enabled else "warn",
+        "sheets",
+        "configured" if config.sheets_enabled else "disabled (no sheet id / service account)",
+    )
+    line(
+        "ok" if config.notify_enabled else "warn",
+        "notify",
+        "configured" if config.notify_enabled else "disabled (no OPENCLAW_TARGET)",
+    )
+
+    # ── browser / anti-bot (Akamai keys on a *real* Chrome — AGENTS.md §3) ──
+    if config.chrome_path:
+        ok = os.path.isfile(config.chrome_path) and os.access(config.chrome_path, os.X_OK)
+        hard_fail = hard_fail or not ok
+        line("ok" if ok else "FAIL", "chrome", f"pinned {config.chrome_path}" + ("" if ok else " — NOT EXECUTABLE"))
+    elif config.chrome_channel:
+        found = shutil.which("google-chrome") or shutil.which("google-chrome-stable") or shutil.which("chrome")
+        line(
+            "ok" if found else "warn",
+            "chrome",
+            f"channel={config.chrome_channel} ({found})" if found else f"channel={config.chrome_channel} — no system Chrome on PATH",
+        )
+    else:
+        line("warn", "chrome", "no path/channel — falls back to bundled Chromium (an Akamai tell)")
+
+    # ── graphical session (the worker drives a headed browser) ──
+    display = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")
+    line(
+        "ok" if display else "warn",
+        "display",
+        display or "no DISPLAY/WAYLAND_DISPLAY — the worker can't run a headed browser here",
+    )
+
+    # ── per-store profiles (login can't be confirmed offline — AGENTS.md §2) ──
+    for label, path in (("costco", config.costco_profile_dir), ("amazon", config.amazon_profile_dir)):
+        if path.exists():
+            stamp = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+            line("ok", f"profile/{label}", f"present, mtime {stamp} (login unverified — run dump-dom)")
+        else:
+            line("warn", f"profile/{label}", f"missing {path} — run `roomieorder login --provider {label}`")
+
+    # ── DB / queue ──
+    try:
+        store = Store(config.db_path)
+        store.init_db()
+        paused = store.is_paused()
+        trouble = sum(1 for r in store.list_queue(200) if r.status in _TROUBLE_STATUSES)
+        line(
+            "warn" if paused else "ok",
+            "worker",
+            f"paused={paused} {store.pause_reason()}" if paused else "running (not paused)",
+        )
+        line("ok", "queue", f"pending={store.pending_count()}  recent_trouble={trouble}")
+        store.close()
+    except Exception as exc:  # noqa: BLE001 — surface, don't crash the check
+        hard_fail = True
+        line("FAIL", "db", f"{config.db_path}: {exc}")
+
+    # ── catalog ──
+    try:
+        items = load_catalog(config.catalog_path)
+        no_source = [k for k, v in items.items() if v.costco is None and v.amazon is None]
+        line("ok", "catalog", f"{len(items)} items" + (f"  (no source: {', '.join(no_source)})" if no_source else ""))
+    except Exception as exc:  # noqa: BLE001
+        hard_fail = True
+        line("FAIL", "catalog", f"{config.catalog_path}: {exc}")
+
+    if hard_fail:
+        raise SystemExit(1)
+
+
+@main.command()
+@click.option("--limit", default=10, show_default=True, help="Max rows / screenshots to show.")
+def failures(limit: int) -> None:
+    """List recent failed/blocked orders and the newest screenshots to read.
+
+    One place to start triage: the recent queue rows that didn't cleanly place
+    (failed/needs_review/challenge/blocked), each with its notes, plus the
+    newest artifacts in the shots dir (``*.png`` / ``*_dom.html`` /
+    ``*_probe.txt``) by full path so they can be opened directly.
+    """
+    config = load_config()
+    store = Store(config.db_path)
+    store.init_db()
+    rows = [r for r in store.list_queue(500) if r.status in _TROUBLE_STATUSES][:limit]
+    if not rows:
+        click.echo("(no recent failures)")
+    for r in rows:
+        click.echo(f"#{r.id:<4} {r.status:<13} {r.item_key:<16} {r.updated_at.isoformat()}")
+        if r.notes:
+            click.echo(f"      {r.notes[:100]}")
+    store.close()
+
+    click.echo("")
+    shots = config.shots_dir
+    click.echo(f"shots dir: {shots}")
+    if not shots.exists():
+        click.echo("  (does not exist yet)")
+        return
+    files = sorted(
+        (p for p in shots.iterdir() if p.is_file()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )[:limit]
+    if not files:
+        click.echo("  (empty)")
+    for f in files:
+        click.echo(f"  {f}")
+
+
+@main.command()
+@click.argument("row_id", type=int)
+@click.option("--resume", "do_resume", is_flag=True, help="Also clear the worker-pause flag.")
+def retry(row_id: int, do_resume: bool) -> None:
+    """Re-enqueue a failed queue row for another attempt.
+
+    Refuses rows whose order may already have been placed (``needs_review``,
+    ``placed``): re-ordering those risks a double charge — confirm against the
+    store account and handle by hand instead (see store.MAX_ATTEMPTS). On a safe
+    status it enqueues a fresh ``pending`` row for the same item.
+    """
+    config = load_config()
+    store = Store(config.db_path)
+    store.init_db()
+    row = next((r for r in store.list_queue(1000) if r.id == row_id), None)
+    if row is None:
+        store.close()
+        raise click.ClickException(f"no queue row #{row_id}")
+    if row.status in {"needs_review", "placed"}:
+        store.close()
+        raise click.ClickException(
+            f"refusing to retry #{row_id} ({row.status}) — the order may already have been "
+            "placed; confirm against the store account before re-ordering"
+        )
+    new_id = store.enqueue(row.item_key, row.requester)
+    click.echo(f"re-enqueued {row.item_key} as #{new_id} (from #{row_id} {row.status})")
+    if do_resume:
+        store.set_paused(False)
+        click.echo("worker resumed")
+    store.close()
 
 
 @main.command()
