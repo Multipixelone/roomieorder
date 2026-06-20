@@ -51,3 +51,6 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+markers = [
+  "browser: needs a headless Playwright browser (provided by the nix shell)",
+]

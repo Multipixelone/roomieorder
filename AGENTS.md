@@ -95,6 +95,21 @@ from Bash against a logged-in profile dir when faster iteration is wanted — bu
 the operator-run `dump-dom` path keeps live Costco hits under operator control,
 which is the default.
 
+**What CI now does prove (real-DOM regression net).** The verified
+**product-page** selectors carry an offline regression net in
+`tests/test_dom_fixtures.py` (`@pytest.mark.browser`): it replays the real
+Playwright locator engine — via the headless browser the nix shell ships —
+against committed, sanitized `dump-dom` snapshots of live Costco HTML
+(`tests/fixtures/dom/`), so a `PRICE_SELECTORS`/`ADD_TO_CART_SELECTORS` edit that
+no longer matches the real page now fails CI instead of slipping through green.
+A captured, PII-scrubbed **checkout** review page would extend the net to
+`PLACE_ORDER_SELECTORS`/`PAYMENT_METHOD_SELECTORS`/`ORDER_TOTAL_SELECTORS` (the
+test exists and skips until one is committed). Two caveats remain: the net only
+drifts when a fixture is **re-captured** (it can't see a future Costco redesign —
+that's the deferred live `verify-selectors` watchdog), and the **confirmation**
+page stays unverifiable here (only reachable past a real Place Order) — the
+standing 🔵.
+
 ## 2. Costco login: prefilled fields ≠ logged in
 
 `roomieorder login` (manual hand-login, `CostcoPurchaser.login` in
@@ -136,10 +151,14 @@ across `purchase.py`, `config.py`, and `nix/module.nix`:
   scripts — those backfire on Akamai (inconsistent, more detectable than
   doing nothing).
 
-**Pending follow-up:** patchright is not packaged in nixpkgs, so the deployed
-Nix build still runs vanilla Playwright — the real-Chrome fix is active, the
-CDP-leak fix is not. Packaging patchright's PyPI-fetched patched driver in
-`nix/package.nix` is the remaining work.
+**patchright ships in the deployed Nix build.** It is packaged from its PyPI
+wheel in `nix/patchright.nix` and wired into `propagatedBuildInputs` via
+`callPackage` in `nix/package.nix` ("two stealth layers, both active in this
+build"); `nix/module.nix` sets `PLAYWRIGHT_NODEJS_PATH` so its bundled Node
+driver runs on a Nix node. So **both** stealth layers are live in production —
+real Chrome *and* the CDP-leak fix — not just on a `pip install -e .[stealth]`
+dev checkout. (`pyproject.toml`'s `stealth` extra is the optional pip path; Nix
+wires patchright separately through `callPackage`, so the extra stays optional.)
 
 **Don't:** revert to bundled Chromium, or add stealth JS shims/custom headers
 to "improve" evasion — both are known to backfire here.
