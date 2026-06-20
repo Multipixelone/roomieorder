@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(roomieorder doctor)",
+      "Bash(roomieorder status)",
+      "Bash(roomieorder failures:*)",
+      "Bash(roomieorder queue:*)",
+      "Bash(roomieorder catalog:*)",
+      "Bash(roomieorder dump-dom:*)",
+      "Bash(roomieorder verify-selectors:*)",
+      "Bash(.venv/bin/roomieorder doctor)",
+      "Bash(.venv/bin/roomieorder status)",
+      "Bash(.venv/bin/roomieorder failures:*)",
+      "Bash(.venv/bin/roomieorder queue:*)",
+      "Bash(.venv/bin/roomieorder catalog:*)",
+      "Bash(.venv/bin/roomieorder dump-dom:*)",
+      "Bash(.venv/bin/roomieorder verify-selectors:*)",
+      "Bash(pytest:*)",
+      "Bash(ruff check:*)",
+      "Bash(mypy:*)",
+      "Bash(nix flake check)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/session-start.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

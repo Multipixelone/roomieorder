@@ -4,6 +4,48 @@ Notes for AI agents working in this repo, distilled from prior sessions. These
 are things that are **not obvious from the code or git history alone** — read
 before touching the buy flow, the catalog, or login/bot-detection logic.
 
+## 0. Troubleshooting cheat-sheet
+
+Start every "why did X break" investigation with the read-only diagnostics
+below — they're safe (no browser, no spend) and tell you where to look. The
+`.claude/commands/` slash commands (`/diagnose`, `/triage-failure`,
+`/verify-selectors`, `/bring-up`) chain these for you.
+
+| Symptom | First command | Then read |
+| --- | --- | --- |
+| "is anything wrong?" / cold start | `roomieorder doctor` | its own output (config, Chrome, display, profiles, DB, catalog) |
+| "the order didn't place" | `roomieorder failures` | the newest `*.png` it lists, plus the row's `notes` |
+| selector miss / store redesign | `roomieorder verify-selectors [item]` | the `*_dom.html` it points at, then read the live selector off it (§1) |
+| logged out / sign-in wall | `roomieorder dump-dom <item>` | §2 — prefilled ≠ logged in; check the **logon URL**, not header text |
+| CAPTCHA / OTP challenge | (worker auto-pauses) `roomieorder status` | §1, §3 — Akamai may be blocking; this is expected-until-verified |
+| Sheets row never appeared | `roomieorder test-sheet` | the gspread error (`-v`); a no-op logger silently "succeeds" otherwise |
+| Telegram silent | `roomieorder test-notify` | `OPENCLAW_*` env + the openclaw binary |
+| stuck after a failure | `roomieorder failures` → fix → `roomieorder retry <id>` | refuses `needs_review`/`placed` (may have ordered) |
+
+`doctor`/`failures`/`status`/`queue`/`catalog`/`dump-dom`/`verify-selectors`
+are read-only and allow-listed in `.claude/settings.json`, so they run without a
+permission prompt. `verify-selectors` (and `dump-dom`) hit live store pages
+read-only and need a logged-in profile + network — they're operator-run, not
+CI.
+
+**Queue statuses** (`store.py`, also the Sheets `status` column): `pending` /
+`in_progress` (transient); `placed` (done); `dry_run`; `skipped_cooldown` /
+`skipped_debounce` (guard declined); `price_blocked` / `spend_capped` (money
+guard); `unavailable` (sold out → triggers Amazon fallback, terminal on the
+last store); `failed`; `needs_review` (Place Order clicked but confirmation
+unread — **may have ordered, never auto-retried**); `challenge`.
+
+`failed` / `challenge` / `needs_review` / `spend_capped` **pause the worker**
+(`main.py:_PAUSE_STATUSES`); clear the cause, then `roomieorder resume`.
+
+**Screenshot tags** (suffix on files in the shots dir, written on each failed
+step) tell you which stage died: `product` / `no_price` / `unavailable` /
+`guard_block` / `no_buy_button` / `no_place_order` / `signin_*` / `challenge_*`
+/ `submitted_unconfirmed` / `confirmation` / `review` / `timeout` / `crash` /
+`dump`. `verify-selectors` and `dump-dom` also write `*_dom.html` (rendered
+page) and `*_probe.txt` (per-selector match counts) — `Read` those to find the
+real selector instead of guessing.
+
 ## 1. Green CI does not mean the buy flow works
 
 `nix flake check` / pytest passing only proves the pure helpers are correct
