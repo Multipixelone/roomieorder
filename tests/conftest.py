@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from roomieorder.config import Config
 from roomieorder.store import Store
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from playwright.sync_api import Browser, Page
+
+_DOM_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "dom"
 
 # Deliberately NOT the repo's catalog.json. This is a purpose-built fixture
 # covering the two source-shapes the code must handle — a two-source item (Costco
@@ -76,3 +82,58 @@ def store(config: Config) -> Iterator[Store]:
     s.init_db()
     yield s
     s.close()
+
+
+# ─────────── browser-backed DOM-fixture harness (see tests/test_dom_fixtures.py) ───────────
+
+
+@pytest.fixture(scope="session")
+def browser() -> Iterator["Browser"]:
+    """A headless Chromium for the `@pytest.mark.browser` DOM-fixture tests.
+
+    The nix dev/CI shell ships the browser (flake.nix → playwright-driver.browsers);
+    a bare `pip install` checkout has none, so a launch failure `skip`s rather
+    than errors — the pure-helper suite still runs anywhere. The `--no-sandbox`
+    / `--disable-dev-shm-usage` flags are CI hygiene for a contentless test
+    browser that never touches a store; they are unrelated to the runtime stealth
+    launch in `purchase._launch_context`, which deliberately avoids such flags.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:  # pragma: no cover - bare checkout
+        pytest.skip(f"playwright not installed: {exc}")
+
+    with sync_playwright() as pw:
+        try:
+            launched = pw.chromium.launch(
+                headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+            )
+        except Exception as exc:  # noqa: BLE001 - no browser binary in this shell
+            pytest.skip(f"no headless Playwright browser available: {exc}")
+        try:
+            yield launched
+        finally:
+            launched.close()
+
+
+@pytest.fixture
+def page(browser: "Browser") -> Iterator["Page"]:
+    """A fresh page per test, so DOM state never leaks between fixtures."""
+    p = browser.new_page()
+    try:
+        yield p
+    finally:
+        p.close()
+
+
+@pytest.fixture
+def dom_fixture() -> Callable[[str], str]:
+    """Read a named committed snapshot from tests/fixtures/dom/ (or `skip`)."""
+
+    def _load(name: str) -> str:
+        path = _DOM_FIXTURE_DIR / name
+        if not path.exists():
+            pytest.skip(f"DOM fixture not captured: {name}")
+        return path.read_text(encoding="utf-8")
+
+    return _load
