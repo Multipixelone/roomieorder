@@ -92,6 +92,13 @@ def test_reorder_debounced(client: TestClient) -> None:
 
 def test_items_reports_cooldown(client: TestClient) -> None:
     engine = client.app.state.engine  # type: ignore[attr-defined]
+    # This test drives the store directly (enqueue → mark placed) to arm the
+    # cooldown. The live worker polls every 20ms and would claim the freshly
+    # enqueued pending row, process it via FakeOrchestrator (dry_run), and mark
+    # it — racing our mark(placed) and intermittently reverting the row's status
+    # so last_placed_at_all() finds no placed order and on_cooldown reads False.
+    # Quiesce the worker first so the only writer is the test.
+    engine.stop_worker()
 
     # Nothing ordered yet → nothing on cooldown.
     before = client.get("/items").json()
