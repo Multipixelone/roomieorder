@@ -44,6 +44,15 @@ let
   exportBaseEnv = lib.concatStringsSep "\n"
     (lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}") baseEnv);
 
+  # The same non-secret baseEnv as a plain KEY=value file, so a dev/operator
+  # shell can `dotenv` the *exact* environment the unit runs with instead of
+  # re-deriving it. Single source (baseEnv) shared with Environment= and
+  # wrappedCli; carries no secrets (those live in environmentFile). Pair it with
+  # environmentFile in the shell to reproduce the full unit env.
+  roomieorderEnvFile = pkgs.writeText "roomieorder.env"
+    (lib.concatStringsSep "\n"
+      (lib.mapAttrsToList (k: v: "${k}=${v}") baseEnv) + "\n");
+
   cliEnvFile = lib.escapeShellArg (toString cfg.environmentFile);
 
   wrappedCli = pkgs.writeShellScriptBin "roomieorder" ''
@@ -151,6 +160,21 @@ in
       default = { };
       example = lib.literalExpression ''{ ROOMIEORDER_DAILY_CAP = "150.00"; ROOMIEORDER_PORT = "8723"; }'';
       description = "Extra non-secret env vars merged into the unit (wins over defaults).";
+    };
+
+    envFile = lib.mkOption {
+      type = lib.types.path;
+      readOnly = true;
+      default = roomieorderEnvFile;
+      defaultText = lib.literalExpression "<generated KEY=value file of baseEnv>";
+      description = ''
+        Read-only: the unit's non-secret environment (baseEnv) as a plain
+        KEY=value file. Drop it somewhere a dev/operator shell can `dotenv`
+        (e.g. environment.etc."roomieorder/env".source = config.services.roomieorder.envFile)
+        so a terminal `roomieorder` reads the same catalog, browser, caps and
+        state paths the service does. Holds no secrets — source environmentFile
+        alongside it for those.
+      '';
     };
   };
 
