@@ -113,6 +113,12 @@ def test_looks_like_challenge(text: str, url: str, expected: bool) -> None:
         ("bounced to logon", "https://www.costco.com/logon", True),
         ("Checkout — Place Order", "", False),
         ("normal product page", "https://www.costco.com/x.product.123.html", False),
+        # The logged-in header renders "Account" (not "Sign In"); on the checkout
+        # page that must NOT read as a wall, or every member checkout false-fails
+        # as a sign-in redirect. Locks the URL/cookie-based detection against a
+        # future edit that naively adds "account"/"sign in" as a marker.
+        ("Welcome back — Account", "https://www.costco.com/CheckoutView", False),
+        ("My Account Orders & Returns", "", False),
     ],
 )
 def test_looks_like_signin(text: str, url: str, expected: bool) -> None:
@@ -163,11 +169,15 @@ class _FakePage:
     mimicking Costco's JS rendering the body after navigation."""
 
     def __init__(
-        self, reveal_on_wait: set[str] | None = None, role_text: bool = False
+        self,
+        reveal_on_wait: set[str] | None = None,
+        role_text: bool = False,
+        url: str = "",
     ) -> None:
         self.present: set[str] = set()
         self._reveal = reveal_on_wait or set()
         self._role_text = role_text
+        self.url = url
         self.clicked: list[str] = []
         self.waited: list[str] = []
 
@@ -222,6 +232,36 @@ def test_wait_for_any_returns_false_on_timeout(config: Config) -> None:
             raise TimeoutError("no selector")
 
     assert _purchaser(config)._wait_for_any(_NeverPage(), _PLACE_ORDER_SELECTORS) is False
+
+
+def test_on_checkout_waits_out_the_landing_race(config: Config) -> None:
+    # The review body paints a beat late: the place-order button is absent on the
+    # first read (and the URL isn't a checkout URL yet) but appears once the page
+    # is given time, mimicking #15's no_buy_button false negative.
+    page = _FakePage(reveal_on_wait={_PLACE_ORDER_SELECTORS[0]})
+    purchaser = _purchaser(config)
+
+    assert purchaser._checkout_landed(page) is False
+    assert purchaser._on_checkout(page) is True
+    assert _PLACE_ORDER_SELECTORS[0] in page.present
+
+
+def test_on_checkout_lands_on_url_without_a_button(config: Config) -> None:
+    # The checkout URL is the drift-immune signal: even if every PLACE_ORDER id
+    # has drifted (none present), a "checkout" URL still counts as landed.
+    page = _FakePage(url="https://www.costco.com/CheckoutView")
+    assert _purchaser(config)._on_checkout(page) is True
+
+
+def test_on_checkout_returns_false_when_never_lands(config: Config) -> None:
+    # No button ever paints and the URL never becomes a checkout URL → the
+    # bounded wait expires and the miss is reported (the real "couldn't reach
+    # checkout" case, distinct from the race).
+    class _NeverPage(_FakePage):
+        def wait_for_selector(self, selector: str, timeout: int | None = None) -> None:
+            raise TimeoutError("no selector")
+
+    assert _purchaser(config)._on_checkout(_NeverPage(url="https://www.costco.com/cart")) is False
 
 
 class _PriceLocator:
