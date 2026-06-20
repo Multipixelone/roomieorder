@@ -271,6 +271,13 @@ class BasePurchaser(Generic[SourceT]):
     # format) to stand on its own.
     ORDER_ID_LABEL_RE: Optional["re.Pattern[str]"] = None
 
+    # Bounded window for the checkout view to finish landing before we call it a
+    # miss — deliberately NOT the full step timeout. The review body can paint a
+    # beat after _settle returns (e.g. Costco's CheckoutCartView → 302 redirect
+    # chain plus late React hydration), so a single instantaneous read mistook an
+    # arrived checkout for "no Place Order" (the no_buy_button false negative).
+    _LANDING_TIMEOUT_MS = 8_000
+
     def __init__(self, config: Config, *, profile_dir: Path, domain: str) -> None:
         self.config = config
         self.profile_dir = profile_dir
@@ -510,11 +517,24 @@ class BasePurchaser(Generic[SourceT]):
 
                 # ── reach the review page ──
                 if not self._start_checkout(page):
+                    # A failure here means we never confirmed the review page. An
+                    # Akamai block or a sign-in bounce mid-drive lands here too, so
+                    # classify those first (worker pauses) instead of mislabelling
+                    # a block as "couldn't drive checkout" and falling back to the
+                    # other store. The bare no_buy_button is the genuine
+                    # cart-drive/selector miss only when it's neither.
+                    if self._is_challenge(page):
+                        return self._challenge(page, item_key, "checkout")
+                    if self._is_signin(page):
+                        return self._signin_required(page, item_key, "checkout")
                     shot = self._screenshot(page, item_key, "no_buy_button")
                     return PurchaseResult(
                         status="failed",
                         unit_price=price,
-                        message="couldn't drive add-to-cart → cart → checkout",
+                        message=(
+                            "couldn't drive add-to-cart → cart → checkout "
+                            f"({self._page_debug(page)})"
+                        ),
                         screenshot=shot,
                     )
 
@@ -523,6 +543,23 @@ class BasePurchaser(Generic[SourceT]):
                     return self._signin_required(page, item_key, "checkout")
                 if self._is_challenge(page):
                     return self._challenge(page, item_key, "checkout")
+                if not self._checkout_landed(page):
+                    # _start_checkout reported success but we're no longer on the
+                    # review page: a krypto-ticket expiry or a soft Akamai bounce
+                    # can drop us back to the storefront. Don't read a total off
+                    # the wrong page or screenshot a "review" that isn't one — the
+                    # challenge check above already caught a hard block, so this is
+                    # the silent-bounce case.
+                    shot = self._screenshot(page, item_key, "left_checkout")
+                    return PurchaseResult(
+                        status="failed",
+                        unit_price=price,
+                        message=(
+                            "reached checkout but bounced off the review page "
+                            f"({self._page_debug(page)})"
+                        ),
+                        screenshot=shot,
+                    )
 
                 # ── read the order total off the review page ──
                 # The confirmation page (Costco's CheckoutConfirmationView_v2)
@@ -532,6 +569,10 @@ class BasePurchaser(Generic[SourceT]):
                 # result (→ Google Sheet, for cost-splitting) even on a dry run,
                 # and stands in when the confirmation scrape finds no total.
                 self._settle(page)
+                # The grand-total element hydrates after the checkout body, so a
+                # bare read can race it to None (seen live). Give it the same
+                # bounded window the landing check uses before reading.
+                self._wait_for_any(page, self.ORDER_TOTAL_SELECTORS, timeout=self._LANDING_TIMEOUT_MS)
                 review_total = self._read_total(page)
 
                 # ── DRY_RUN stops here ──
@@ -967,6 +1008,29 @@ class BasePurchaser(Generic[SourceT]):
         except Exception:  # noqa: BLE001 — caller handles the miss
             return False
 
+    def _checkout_landed(self, page: "Page") -> bool:
+        """One instantaneous read of the review-page landing signals.
+
+        The Place Order button is the definitive signal — it exists only on the
+        review page, never on the cart. The URL is the drift-immune backstop, but
+        it must distinguish the review page from the cart: verified live on Costco
+        2026-06-17, the review URL is `…/SinglePageCheckoutView` while the cart is
+        `…/CheckoutCartView` → `…/CheckoutCartDisplayView`, and *both* carry
+        "checkout". A bare "checkout in url" match therefore read the cart — and
+        any post-checkout bounce back through it — as landed (the homepage-as-review
+        false positive). Require "checkout" AND not "cart"."""
+        for sel in self.PLACE_ORDER_SELECTORS:
+            try:
+                if page.locator(sel).first.count() > 0:
+                    return True
+            except Exception:  # noqa: BLE001 — try the next candidate
+                continue
+        try:
+            url = (page.url or "").lower()
+        except Exception:  # noqa: BLE001 — no URL and no button → not landed
+            return False
+        return "checkout" in url and "cart" not in url
+
     def _click_first(self, page: "Page", selectors: tuple[str, ...]) -> bool:
         for sel in selectors:
             try:
@@ -1387,21 +1451,17 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
     def _on_checkout(self, page: "Page") -> bool:
         """True once we've landed on the place-order review page.
 
-        Costco's SinglePageCheckoutView carries "Checkout" in its URL; the
-        Place Order button is the structural backstop when the URL can't be
-        read. Pure detection — clicks nothing."""
-        try:
-            if "checkout" in (page.url or "").lower():
-                return True
-        except Exception:  # noqa: BLE001 — fall back to the DOM signal
-            pass
-        for sel in self.PLACE_ORDER_SELECTORS:
-            try:
-                if page.locator(sel).first.count() > 0:
-                    return True
-            except Exception:  # noqa: BLE001 — try the next candidate
-                continue
-        return False
+        Patient by design: the review view can paint a beat after _settle, so an
+        instantaneous read raced the land and reported a miss on a page that
+        arrived a moment later. Check once, then give it a bounded window to
+        paint before re-checking. Short timeout, not the step timeout: the
+        PLACE_ORDER ids may drift, and the URL re-check is the drift-immune signal
+        that still resolves once navigation settles. Pure detection — clicks
+        nothing."""
+        if self._checkout_landed(page):
+            return True
+        self._wait_for_any(page, self.PLACE_ORDER_SELECTORS, timeout=self._LANDING_TIMEOUT_MS)
+        return self._checkout_landed(page)
 
     def _select_payment_method(self, page: "Page") -> bool:
         """Select the saved default card so Place Order isn't inert.
