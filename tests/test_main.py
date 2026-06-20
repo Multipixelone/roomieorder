@@ -221,6 +221,69 @@ def test_worker_pauses_when_recorded_spend_breaches_cap(
         FakeOrchestrator.result_status = "dry_run"
 
 
+def test_sheet_status_relabels_owned_placed_orders() -> None:
+    from roomieorder.catalog import CostcoSource
+    from roomieorder.main import _sheet_status
+
+    src = CostcoSource(item_number="123", expected_price=1, price_ceiling=2)
+    owned = CatalogItem(title="Finn's Protein Bars", owner="Finn", costco=src)
+    shared = CatalogItem(title="Paper Towels", costco=src)
+
+    # A placed order for an owned item is relabelled for the shared sheet…
+    assert _sheet_status(owned, "placed") == "ordered for Finn"
+    # …while shared-household items keep the raw "placed".
+    assert _sheet_status(shared, "placed") == "placed"
+    # Ownership never masks a non-placed outcome — the operator still sees it.
+    assert _sheet_status(owned, "skipped_cooldown") == "skipped_cooldown"
+    assert _sheet_status(owned, "failed") == "failed"
+
+
+def test_log_sheet_writes_owner_label(config: Config) -> None:
+    # End-to-end of the Sheets wiring: a placed owned order lands in the sheet
+    # row as "ordered for <owner>", with the internal queue status untouched.
+    from datetime import datetime, timezone
+
+    from roomieorder.catalog import CostcoSource
+    from roomieorder.main import Engine
+    from roomieorder.sheets import NullSheets
+    from roomieorder.store import QueueRow
+
+    engine = Engine(config)
+    try:
+        captured: list[dict[str, object]] = []
+
+        # Subclass NullSheets so the recorder is a valid SheetsClient (the type
+        # of engine.sheets) while capturing what _log_sheet would append.
+        class RecordingSheets(NullSheets):
+            def append(self, row: dict[str, object]) -> bool:
+                captured.append(row)
+                return True
+
+        engine.sheets = RecordingSheets()
+        item = CatalogItem(
+            title="Finn's Protein Bars",
+            owner="Finn",
+            costco=CostcoSource(item_number="123", expected_price=1, price_ceiling=2),
+        )
+        now = datetime.now(timezone.utc)
+        row = QueueRow(
+            id=1, item_key="finn_bars", requester="finn", status="placed",
+            created_at=now, updated_at=now,
+        )
+        result = PurchaseResult(
+            status="placed", provider="costco", order_total=9.99, order_id="A1",
+            message="placed finn_bars",
+        )
+        engine._log_sheet(row, item, result)
+
+        assert captured[0]["status"] == "ordered for Finn"
+        assert captured[0]["requester"] == "finn"
+        # The internal status the queue/guards see is still the real "placed".
+        assert result.status == "placed"
+    finally:
+        engine.store.close()
+
+
 def test_worker_pauses_on_challenge(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
     monkeypatch.setattr("roomieorder.main.Orchestrator", FakeOrchestrator)

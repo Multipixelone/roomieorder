@@ -69,6 +69,20 @@ def _product_id(item: CatalogItem, provider: str) -> str:
     return ""
 
 
+def _sheet_status(item: CatalogItem, status: str) -> str:
+    """The label written to the Sheets `status` column for one attempt.
+
+    A *placed* order for a personally-owned item (catalog ``owner`` set) reads
+    "ordered for <owner>" so the shared log separates a roommate's personal buy
+    from a shared-household order. Only the display label changes — the internal
+    queue status stays ``placed``, so cooldown/spend/pause logic is untouched. A
+    non-placed outcome (skipped, blocked, failed…) keeps its raw status for the
+    operator regardless of owner."""
+    if status == "placed" and item.owner:
+        return f"ordered for {item.owner}"
+    return status
+
+
 class ReorderRequest(BaseModel):
     item_key: str
     requester: str = "household"
@@ -268,7 +282,7 @@ class Engine:
                 "unit_price": result.unit_price,
                 "order_total": result.order_total,
                 "order_id": result.order_id,
-                "status": result.status,
+                "status": _sheet_status(item, result.status),
                 "requester": row.requester,
                 "notes": result.message,
             }

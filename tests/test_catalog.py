@@ -45,6 +45,17 @@ def test_category_roundtrips(tmp_path: Path) -> None:
     assert load_catalog(p)["x"].category == "Kitchen"
 
 
+def test_owner_roundtrips(tmp_path: Path) -> None:
+    p = _write(tmp_path, {"title": "t", "owner": "Finn", "costco": _costco()})
+    assert load_catalog(p)["x"].owner == "Finn"
+
+
+def test_owner_defaults_empty(tmp_path: Path) -> None:
+    # Shared-household items omit owner; it defaults to "" (no "ordered for").
+    p = _write(tmp_path, {"title": "t", "costco": _costco()})
+    assert load_catalog(p)["x"].owner == ""
+
+
 def test_missing_file(tmp_path: Path) -> None:
     with pytest.raises(CatalogError, match="not found"):
         load_catalog(tmp_path / "nope.json")

@@ -89,3 +89,26 @@ rest:
 #       and s not in ['unknown', 'unavailable', ''] %}{{ relative_time(as_datetime(s)) }} ago{% endif %}
 #     tap_action: { action: perform-action, perform_action: script.order_paper_towels }
 #   # …one card per item (toilet_paper, dish_soap, …).
+
+# ─────────── Per-owner grids (personal dashboards) ───────────
+# A catalog item with an `owner` (e.g. finn_protein_bars → "owner": "Finn") is a
+# roommate's personal buy: a placed order logs `ordered for Finn` in Sheets, and
+# the generator keeps that item OFF the shared grid. lib.haButtons exposes three
+# dashboard cards so you can split shared vs personal:
+#
+#   .dashboardCardDynamic    → every item (owned + shared); unchanged.
+#   .dashboardCardHousehold  → shared grid with owner-tagged items removed —
+#                              put this on the shared/household dashboard.
+#   .dashboardCardsByOwner   → { "Finn" = <grid of Finn's items>; … } — splice
+#                              the owner you want into that person's dashboard.
+#
+# Nix wiring (the real deployment uses lib.haButtons directly):
+#   let buttons = inputs.roomieorder.lib.haButtons {
+#         catalogFile = ./catalog.json; endpoint = "http://192.168.6.6:8723";
+#       };
+#   in {
+#     # shared dashboard view — personal items excluded
+#     views = [ { title = "Reorder"; cards = [ buttons.dashboardCardHousehold ]; } ];
+#     # Finn's personal dashboard view
+#     # cards = [ buttons.dashboardCardsByOwner."Finn" ];
+#   }

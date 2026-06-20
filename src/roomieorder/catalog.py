@@ -85,6 +85,12 @@ class CatalogItem(BaseModel):
     button: str = ""  # short label for the HA button (falls back to title)
     icon: str = ""  # mdi icon for the HA button (falls back to a default)
     category: str = ""  # groups/sorts items on the generated HA dashboard
+    # Personal owner of this item. When set, the order is still placed for real,
+    # but the Sheets `status` column reads "ordered for <owner>" instead of
+    # "placed" so the shared log distinguishes one roommate's personal buy from a
+    # shared-household order. Purely a display label — the internal queue status
+    # stays `placed`, so cooldown/spend/pause logic is unaffected.
+    owner: str = ""
     # Block re-order inside this many days of the last placed order.
     cooldown_days: int = Field(default=0, ge=0, le=365)
     # The two sources. Costco is tried first; Amazon is the fallback. At least

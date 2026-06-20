@@ -26,7 +26,16 @@
 #                   was last ordered inside its `cooldown_days` window. Needs
 #                   `sensors` wired into config.rest (above). When catalog items
 #                   set a `category`, cards are grouped under a heading per
-#                   category. Card count per row is `dashboardColumns`.
+#                   category. Card count per row is `dashboardColumns`. Holds
+#                   EVERY item (owned or not) — unchanged shared-catalog grid.
+#   dashboardCardHousehold → same dynamic grid as dashboardCardDynamic but with
+#                   owner-tagged (personal) items filtered out — the grid to put
+#                   on the SHARED household dashboard so personal items don't
+#                   show there.
+#   dashboardCardsByOwner → { "<owner>" = <dynamic grid of that owner's items>; }
+#                   keyed by the catalog `owner` field. Splice e.g.
+#                   `dashboardCardsByOwner."Finn"` into a personal dashboard.
+#                   Empty attrset when no item sets an `owner`.
 #
 # Example:
 #   buttons = inputs.roomieorder.lib.haButtons {
@@ -59,19 +68,24 @@ let
   nameFor = key: if (catalog.${key}.button or "") != "" then catalog.${key}.button else catalog.${key}.title;
   iconFor = key: if (catalog.${key}.icon or "") != "" then catalog.${key}.icon else defaultIcon;
   categoryFor = key: catalog.${key}.category or "";
+  ownerFor = key: catalog.${key}.owner or "";
   statusEntity = key: "sensor.${statusSensorPrefix}${key}";
 
   # Items in stable display order: by name (the button label), so a category's
   # cards read alphabetically regardless of item_key.
   sortedKeys = builtins.sort (a: b: nameFor a < nameFor b) keys;
 
-  # Ordered, de-duplicated category list (sorted; the empty "" group, if any,
-  # sorts first and is labelled "Other" below).
-  orderedCategories = builtins.foldl' (
-    acc: c: if builtins.elem c acc then acc else acc ++ [ c ]
-  ) [ ] (builtins.sort (a: b: a < b) (map categoryFor keys));
-  hasCategories = builtins.any (c: c != "") orderedCategories;
-  keysInCategory = cat: builtins.filter (key: categoryFor key == cat) sortedKeys;
+  # Keys (in display order) for a given owner, and the unowned/shared remainder.
+  # An item's `owner` marks it as one roommate's personal buy: it moves off the
+  # shared household grid onto that owner's own grid (dashboardCardsByOwner).
+  keysOwnedBy = owner: builtins.filter (key: ownerFor key == owner) sortedKeys;
+  unownedKeys = builtins.filter (key: ownerFor key == "") sortedKeys;
+
+  # Ordered, de-duplicated, non-empty owner list (sorted). Drives the per-owner
+  # grids; empty when no item sets an owner.
+  orderedOwners = builtins.foldl' (
+    acc: o: if o == "" || builtins.elem o acc then acc else acc ++ [ o ]
+  ) [ ] (builtins.sort (a: b: a < b) (map ownerFor keys));
 
   scriptFor = key: {
     id = "order_${key}";
@@ -147,6 +161,33 @@ let
     type = "markdown";
     content = "## ${label}";
   };
+
+  # A dynamic (cooldown-aware) Mushroom dashboard card for an arbitrary key set.
+  # When any key in the set carries a `category`, items are grouped under a
+  # markdown heading per category (a `vertical-stack` of heading + grid);
+  # otherwise it's a single flat grid. Grouping is computed from *this* key set,
+  # so a filtered subset (household / one owner) groups by its own categories.
+  dynamicGridFor =
+    ks:
+    let
+      orderedCategories = builtins.foldl' (
+        acc: c: if builtins.elem c acc then acc else acc ++ [ c ]
+      ) [ ] (builtins.sort (a: b: a < b) (map categoryFor ks));
+      hasCategories = builtins.any (c: c != "") orderedCategories;
+      keysInCategory = cat: builtins.filter (key: categoryFor key == cat) ks;
+    in
+    if hasCategories then
+      {
+        type = "vertical-stack";
+        cards = builtins.concatLists (
+          map (cat: [
+            (headingCard (if cat == "" then "Other" else cat))
+            (mushroomGrid (keysInCategory cat))
+          ]) orderedCategories
+        );
+      }
+    else
+      mushroomGrid ks;
 in
 {
   restCommand.${restCommandName} = {
@@ -182,20 +223,22 @@ in
     cards = map buttonFor keys;
   };
 
-  # Mushroom grid that grays items out inside their cooldown window. When any
-  # item carries a `category`, items are grouped under a markdown heading per
-  # category (a `vertical-stack` of heading + grid); otherwise it's one grid.
-  dashboardCardDynamic =
-    if hasCategories then
-      {
-        type = "vertical-stack";
-        cards = builtins.concatLists (
-          map (cat: [
-            (headingCard (if cat == "" then "Other" else cat))
-            (mushroomGrid (keysInCategory cat))
-          ]) orderedCategories
-        );
-      }
-    else
-      mushroomGrid sortedKeys;
+  # Mushroom grid that grays items out inside their cooldown window — every item
+  # (owned or not), so existing consumers see the whole catalog unchanged.
+  dashboardCardDynamic = dynamicGridFor sortedKeys;
+
+  # The shared household grid: same dynamic Mushroom card, but with owner-tagged
+  # (personal) items filtered out. Put this on the shared dashboard so a roommate
+  # can't see or tap someone's personal items.
+  dashboardCardHousehold = dynamicGridFor unownedKeys;
+
+  # Per-owner grids: { "<owner>" = <dynamic Mushroom grid of that owner's items>; }.
+  # Splice e.g. dashboardCardsByOwner."Finn" into a personal dashboard. Empty
+  # attrset when no catalog item sets an `owner`.
+  dashboardCardsByOwner = builtins.listToAttrs (
+    map (owner: {
+      name = owner;
+      value = dynamicGridFor (keysOwnedBy owner);
+    }) orderedOwners
+  );
 }

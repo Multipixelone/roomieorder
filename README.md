@@ -45,7 +45,7 @@ Intake is always-on; execution needs a live graphical session. Requests sit in t
 
 ## Configuration
 
-`catalog.json` maps item keys to shared fields (title, quantity, cooldown) plus a `costco` block (item number + URL) and/or an `amazon` block (ASIN + URL), each with its own expected price and price ceiling. Costco is tried first; Amazon is the fallback. At least one source is required. See [`examples/catalog.json`](./examples/) and [`examples/env.example`](./examples/) for the full schema.
+`catalog.json` maps item keys to shared fields (title, quantity, cooldown) plus a `costco` block (item number + URL) and/or an `amazon` block (ASIN + URL), each with its own expected price and price ceiling. Costco is tried first; Amazon is the fallback. At least one source is required. An optional `owner` field marks an item as one roommate's personal buy — the order is still placed for real, but the Sheets `status` column logs `ordered for <owner>` instead of `placed` so the shared log separates personal orders from shared-household ones. See [`examples/catalog.json`](./examples/) and [`examples/env.example`](./examples/) for the full schema.
 
 ### Safety rails
 

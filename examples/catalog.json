@@ -49,5 +49,19 @@
       "expected_price": 11.99,
       "price_ceiling": 16.00
     }
+  },
+  "finn_protein_bars": {
+    "title": "Kirkland Signature Protein Bars, 20 ct",
+    "button": "Finn's Protein Bars",
+    "icon": "mdi:food-variant",
+    "qty": 1,
+    "cooldown_days": 7,
+    "owner": "Finn",
+    "costco": {
+      "item_number": "1645298",
+      "url": "https://www.costco.com/kirkland-signature-protein-bars.product.1645298.html",
+      "expected_price": 23.99,
+      "price_ceiling": 29.00
+    }
   }
 }

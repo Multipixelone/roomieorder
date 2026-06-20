@@ -88,11 +88,29 @@
                 endpoint = "http://example:8723";
               };
               n = builtins.length (builtins.attrNames (builtins.fromJSON (builtins.readFile ./catalog.json)));
+              # Second instance over examples/catalog.json, which carries an
+              # owner-tagged item (finn_protein_bars, owner "Finn") so the
+              # household/per-owner partition is exercised in CI.
+              b2 = import ./nix/ha-buttons.nix {
+                catalogFile = ./examples/catalog.json;
+                endpoint = "http://example:8723";
+              };
+              n2 = builtins.length (
+                builtins.attrNames (builtins.fromJSON (builtins.readFile ./examples/catalog.json))
+              );
               ok =
                 (builtins.length b.scripts == n)
                 && (b.restCommand ? roomieorder_reorder)
                 && (builtins.length b.dashboardCard.cards == n)
-                && (builtins.all (s: builtins.substring 0 6 s.id == "order_") b.scripts);
+                && (builtins.all (s: builtins.substring 0 6 s.id == "order_") b.scripts)
+                # Repo catalog has no owners → no per-owner grids, household == all.
+                && (b ? dashboardCardHousehold)
+                && (b.dashboardCardsByOwner == { })
+                # Example catalog: Finn's one item lands on his grid only, and the
+                # household grid holds every other (all-but-one) item.
+                && (b2.dashboardCardsByOwner ? Finn)
+                && (builtins.length b2.dashboardCardsByOwner.Finn.cards == 1)
+                && (builtins.length b2.dashboardCardHousehold.cards == n2 - 1);
             in
             if ok then
               pkgs.runCommand "ha-buttons-check" { } "touch $out"
