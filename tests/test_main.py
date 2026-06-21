@@ -284,6 +284,63 @@ def test_log_sheet_writes_owner_label(config: Config) -> None:
         engine.store.close()
 
 
+def test_auto_retry_reenqueues_money_safe_failures_bounded(config: Config) -> None:
+    # A retryable pre-cart failure is re-driven instead of pausing, bounded to
+    # auto_retry_max so a persistently-failing item still ends up stopping.
+    from datetime import datetime, timezone
+
+    from roomieorder.main import Engine
+    from roomieorder.store import QueueRow
+
+    cfg = config.model_copy(update={"auto_retry": True, "auto_retry_max": 2})
+    engine = Engine(cfg)
+    try:
+        now = datetime.now(timezone.utc)
+        row = QueueRow(
+            id=1, item_key="paper_towels", requester="bob", status="failed",
+            created_at=now, updated_at=now,
+        )
+        result = PurchaseResult(status="failed", retryable=True, message="timeout")
+
+        assert engine._maybe_auto_retry(row, result) is True
+        assert engine._maybe_auto_retry(row, result) is True
+        # Bound reached → no further retry; the caller falls through to pausing.
+        assert engine._maybe_auto_retry(row, result) is False
+
+        pending = [r for r in engine.store.list_queue(50) if r.status == "pending"]
+        assert len(pending) == 2
+        assert all(r.item_key == "paper_towels" for r in pending)
+    finally:
+        engine.store.close()
+
+
+def test_auto_retry_off_by_default_and_skips_non_retryable(config: Config) -> None:
+    from datetime import datetime, timezone
+
+    from roomieorder.main import Engine
+    from roomieorder.store import QueueRow
+
+    now = datetime.now(timezone.utc)
+    row = QueueRow(
+        id=1, item_key="paper_towels", requester="bob", status="failed",
+        created_at=now, updated_at=now,
+    )
+
+    # Flag off (default) → never retries, even a retryable failure.
+    off = Engine(config)
+    try:
+        assert off._maybe_auto_retry(row, PurchaseResult(status="failed", retryable=True)) is False
+    finally:
+        off.store.close()
+
+    # Flag on but the failure isn't money-safe (cart touched) → still no retry.
+    on = Engine(config.model_copy(update={"auto_retry": True}))
+    try:
+        assert on._maybe_auto_retry(row, PurchaseResult(status="failed", retryable=False)) is False
+    finally:
+        on.store.close()
+
+
 def test_worker_pauses_on_challenge(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
     monkeypatch.setattr("roomieorder.main.Orchestrator", FakeOrchestrator)
