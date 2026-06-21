@@ -1681,7 +1681,9 @@ class AmazonPurchaser(BasePurchaser[AmazonSource]):
     PROVIDER = "amazon"
     STORE_NAME = "Amazon"
 
-    # TODO(amazon): verify against live DOM — PDP price block.
+    # Price block — verified against the live PDP dump (2026-06-21): the modern
+    # corePrice container and the generic a-price span both carry the amount. The
+    # legacy priceblock_* ids stay as fallbacks for older PDP variants.
     PRICE_SELECTORS = (
         "#corePriceDisplay_desktop_feature_div span.a-offscreen",
         "#corePrice_feature_div span.a-offscreen",
@@ -1689,16 +1691,22 @@ class AmazonPurchaser(BasePurchaser[AmazonSource]):
         "#priceblock_dealprice",
         "span.a-price span.a-offscreen",
     )
+    # The modern PDP emits no product/price <meta> tags (none in the live dump);
+    # kept only as a best-effort fallback for pages that still render them.
     PRICE_META_SELECTORS = (
         "meta[property='product:price:amount']",
         "meta[property='og:price:amount']",
         "meta[itemprop='price']",
     )
-    # TODO(amazon): verify against live DOM — Buy Now / Add to Cart / proceed.
+    # Add to Cart verified against the live PDP dump (2026-06-21). The Buy Now
+    # button is injected by the turbo-checkout widget after load, so it isn't in
+    # the static DOM — Amazon's own turboState declares its initiate selector as
+    # [id^=buy-now-button], so lead with that and keep the exact / legacy ids as
+    # fallbacks.
     BUY_NOW_SELECTORS = (
+        "[id^='buy-now-button']",
         "#buy-now-button",
         "input[name='submit.buy-now']",
-        "#submit\\.buy-now",
     )
     ADD_TO_CART_SELECTORS = (
         "#add-to-cart-button",
