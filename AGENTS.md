@@ -89,11 +89,22 @@ logged-in profile. (`_PRICE_SELECTORS` already has a structured-data fallback �
 `og:price`/`product:price:amount` meta tags, then JSON-LD `offers.price` — for
 when the visible-price CSS guesses miss on the `/p/-/<slug>/<id>` storefront.)
 
-The assistant's own Bash shell has graphical-session access on host `link`
-(`WAYLAND_DISPLAY`, `DISPLAY` set), so headed Playwright can be driven directly
+The assistant's own Bash shell on host `link` can reach the graphical session,
+so headed Playwright (`dump-dom`, `dry-run`, `login`) can be driven directly
 from Bash against a logged-in profile dir when faster iteration is wanted — but
 the operator-run `dump-dom` path keeps live Costco hits under operator control,
-which is the default.
+which is the default. **Catch: the Bash-tool shell does _not_ export
+`WAYLAND_DISPLAY`/`DISPLAY` by default — they're empty.** The compositor sockets
+exist (`/run/user/$(id -u)/wayland-1`, `/tmp/.X11-unix/X0`), but Chrome launches
+with a hardcoded `--ozone-platform=wayland` and dies with `Failed to connect to
+Wayland display` → patchright reports it as `TargetClosedError: ...browser has
+been closed` — looks like a crash, is actually a missing display env. Prefix any
+headed run with `WAYLAND_DISPLAY=wayland-1 DISPLAY=:0` (after the `direnv export`
+eval). This only bites the agent shell; the systemd **user** service inherits
+the real session env (`nix/module.nix` §4), and an operator's own terminal
+already has both set — so **don't** hardcode them into the Nix wrapper, whose
+values (`wayland-1`/`:0`) are session-specific and would override correct
+runtime values.
 
 **What CI now does prove (real-DOM regression net).** The verified
 **product-page** selectors carry an offline regression net in
