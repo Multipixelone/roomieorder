@@ -759,3 +759,19 @@ def test_amazon_resolves_dp_url_from_asin(config: Config) -> None:
 
     url = _amazon(config)._resolve_url(_Src())
     assert url == "https://www.amazon.com/dp/B07YYYYYYY"
+
+
+def test_amazon_login_init_script_forces_remember_me(config: Config) -> None:
+    # Amazon persists the session by forcing the rememberMe form param at login
+    # (the "Keep me signed in" box Amazon A/B-tests away) rather than juggling
+    # session-scoped cookies. The login-only init script must drive it.
+    script = _amazon(config)._login_init_script()
+    assert script is not None
+    assert "rememberMe" in script
+    assert "ensureRememberMe" in script
+
+
+def test_base_login_init_script_is_none(config: Config) -> None:
+    # Costco reloads from a persistent SSO cookie and needs no login tweak, so
+    # the base hook injects nothing — the buy/dump flows stay JS-free.
+    assert _purchaser(config)._login_init_script() is None
