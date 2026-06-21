@@ -696,9 +696,12 @@ class _ConfirmPage:
     """Models an order-confirmation page: a body blob plus an optional grand-total
     element. Missing selectors report count=0 like a real locator miss."""
 
-    def __init__(self, *, body: str = "", total_text: str | None = None) -> None:
+    def __init__(
+        self, *, body: str = "", total_text: str | None = None, url: str = ""
+    ) -> None:
         self._body = body
         self._total_text = total_text
+        self.url = url
 
     def locator(self, selector: str) -> _ConfirmLocator:
         if selector == "body":
@@ -713,14 +716,35 @@ class _ConfirmPage:
 
 def test_scrape_confirmation_reads_labelled_id_and_total(config: Config) -> None:
     page = _ConfirmPage(body="Thanks! Order # 123456789 confirmed", total_text="$24.99")
-    order_id, total = _purchaser(config)._scrape_confirmation(page)
+    order_id, total, confirmed = _purchaser(config)._scrape_confirmation(page)
     assert order_id == "123456789"
     assert total == 24.99
+    assert confirmed is True
 
 
 def test_scrape_confirmation_returns_none_when_blank(config: Config) -> None:
-    order_id, total = _purchaser(config)._scrape_confirmation(_ConfirmPage(body="loading…"))
+    # No id, no total, no success banner / thank-you URL → unconfirmed.
+    order_id, total, confirmed = _purchaser(config)._scrape_confirmation(
+        _ConfirmPage(body="loading…")
+    )
     assert order_id is None and total is None
+    assert confirmed is False
+
+
+def test_scrape_confirmation_confirms_on_success_banner(config: Config) -> None:
+    # The exact false-needs_review case: a placed order whose number/total can't
+    # be scraped, but the page shows Amazon's success banner. → confirmed.
+    page = _ConfirmPage(body="Order placed, thanks!")
+    order_id, total, confirmed = _amazon(config)._scrape_confirmation(page)
+    assert order_id is None and total is None
+    assert confirmed is True
+
+
+def test_scrape_confirmation_confirms_on_thankyou_url(config: Config) -> None:
+    # Blank body but the thank-you URL alone confirms the order.
+    page = _ConfirmPage(url="https://www.amazon.com/gp/buy/thankyou/handlers/display.html")
+    _, _, confirmed = _amazon(config)._scrape_confirmation(page)
+    assert confirmed is True
 
 
 def test_submitted_unconfirmed_flags_needs_review(config: Config) -> None:

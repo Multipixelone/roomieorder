@@ -268,6 +268,13 @@ class BasePurchaser(Generic[SourceT]):
     # Sold-out / not-carried / not-found markers that drive the Amazon fallback.
     OUT_OF_STOCK_MARKERS: tuple[str, ...] = ()
     NOT_FOUND_MARKERS: tuple[str, ...] = ()
+    # Positive order-confirmation signals, checked alongside the order id / total.
+    # A match means the store rendered a success page, so a placed order is no
+    # longer misread as `needs_review` when the id/total selectors miss (the
+    # confirmation can show a success banner with no scrapeable number). Both are
+    # lowercased substring tests; empty by default.
+    CONFIRMATION_MARKERS: tuple[str, ...] = ()       # success-banner body text
+    CONFIRMATION_URL_MARKERS: tuple[str, ...] = ()   # thank-you URL fragments
     ORDER_ID_RE = re.compile(r"\b\d{9,12}\b")
     # Label-anchored order-id capture, tried *before* the bare ORDER_ID_RE so a
     # phone number / item number / ZIP+4 elsewhere on the confirmation page can't
@@ -648,16 +655,17 @@ class BasePurchaser(Generic[SourceT]):
                     return self._challenge(page, item_key, "confirm")
 
                 self._settle(page)
-                order_id, total = self._scrape_confirmation(page)
-                if order_id is None and total is None:
-                    # Submitted, but nothing confirmable scraped — don't claim a
-                    # clean `placed` we can't evidence. Flag for human review,
-                    # carrying the review-page total so the row still logs a
-                    # dollar amount to split.
+                order_id, total, confirmed = self._scrape_confirmation(page)
+                if not confirmed:
+                    # Submitted, but nothing confirmable scraped — no order id,
+                    # no total, and no success banner / thank-you URL. Don't
+                    # claim a clean `placed` we can't evidence. Flag for human
+                    # review, carrying the review-page total so the row still
+                    # logs a dollar amount to split.
                     return self._submitted_unconfirmed(
                         page,
                         item_key,
-                        "no order number or total on the confirmation page",
+                        "no order number, total, or confirmation banner on the page",
                         order_total=review_total,
                     )
                 # The confirmation page rarely carries a total (Costco's v2 view
@@ -1153,23 +1161,50 @@ class BasePurchaser(Generic[SourceT]):
                 continue
         return None
 
-    def _scrape_confirmation(self, page: "Page") -> tuple[Optional[str], Optional[float]]:
+    def _scrape_confirmation(
+        self, page: "Page"
+    ) -> tuple[Optional[str], Optional[float], bool]:
         # Defensive read: the confirmation body can paint a beat after the order
         # POST returns, so a single read can miss it. Retry a few times before
         # giving up — a missed scrape here is what makes a placed order look
         # unconfirmed (see _submitted_unconfirmed).
+        #
+        # Returns (order_id, total, confirmed). `confirmed` is True when *any*
+        # positive signal is seen — a success banner / thank-you URL, an order
+        # id, or a total — so a real order whose number/total can't be scraped
+        # still reads as `placed` instead of `needs_review`.
         body = ""
+        confirmed = False
         for attempt in range(3):
             try:
                 body = page.locator("body").inner_text(timeout=5_000)
             except Exception:  # noqa: BLE001
                 body = ""
-            if self._find_order_id(body) is not None:
+            confirmed = self._looks_confirmed(page, body)
+            if confirmed or self._find_order_id(body) is not None:
                 break
             if attempt < 2:
                 self._settle(page)
         order_id = self._find_order_id(body)
-        return order_id, self._read_total(page)
+        total = self._read_total(page)
+        return order_id, total, (confirmed or order_id is not None or total is not None)
+
+    def _looks_confirmed(self, page: "Page", body: str) -> bool:
+        """True when the page shows a recognized order-confirmation signal.
+
+        A positive banner/URL match is authoritative — the store only renders
+        these on a successful order — so it confirms a placed order even when the
+        order id and total can't be scraped (Amazon's confirmation surfaced
+        'Order placed, thanks!' with no scrapeable number, the
+        false-needs_review case this guards against)."""
+        try:
+            url = (page.url or "").lower()
+        except Exception:  # noqa: BLE001
+            url = ""
+        if any(m in url for m in self.CONFIRMATION_URL_MARKERS):
+            return True
+        text = body.lower()
+        return any(m in text for m in self.CONFIRMATION_MARKERS)
 
     def _find_order_id(self, body: str) -> Optional[str]:
         """Extract the order id from the confirmation body text.
@@ -1435,6 +1470,11 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
         r"(?:order|confirmation)\s*(?:number|no\.?|#)?\s*[:#]?\s*(\d{7,12})",
         re.I,
     )
+    # Backup confirmation signals for CheckoutConfirmationView_v2 (already
+    # detected via the order number, so these only matter if the number scrape
+    # misses). TODO(costco): verify banner wording + URL against live DOM.
+    CONFIRMATION_MARKERS = ("thank you for your order", "order confirmation")
+    CONFIRMATION_URL_MARKERS = ("checkoutconfirmation", "orderconfirmation")
 
     def _resolve_url(self, source: CostcoSource) -> str:
         return source.url or self.config.costco_product_url(source.item_number)
@@ -1722,6 +1762,20 @@ class AmazonPurchaser(BasePurchaser[AmazonSource]):
     )
     # Amazon order numbers look like 123-4567890-1234567.
     ORDER_ID_RE = re.compile(r"\b\d{3}-\d{7}-\d{7}\b")
+    # Order-confirmation success signals — the thank-you page renders a banner
+    # and lands on a /thankyou URL even when the dashed order number isn't in the
+    # scraped body text (the false-needs_review case). TODO(amazon): verify the
+    # banner wording against live DOM; "Order placed, thanks!" is observed.
+    CONFIRMATION_MARKERS = (
+        "order placed, thank",      # "Order placed, thanks!" (observed live)
+        "thank you, your order",
+        "your order has been placed",
+        "placed your order",
+    )
+    CONFIRMATION_URL_MARKERS = (
+        "/gp/buy/thankyou",
+        "thankyou",
+    )
 
     def _resolve_url(self, source: AmazonSource) -> str:
         return source.url or self.config.amazon_product_url(source.asin)
