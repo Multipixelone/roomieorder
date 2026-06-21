@@ -41,7 +41,7 @@ _WORKER_POLL_SECONDS = 5.0
 # Outcomes that halt the worker until the operator clears them (PLAN §5).
 # `needs_review` means an order may have been placed but couldn't be confirmed —
 # halt so a human checks before anything re-orders the item.
-_PAUSE_STATUSES = {"challenge", "failed", "spend_capped", "needs_review"}
+_PAUSE_STATUSES = {"challenge", "blocked", "failed", "spend_capped", "needs_review"}
 
 
 def _require_token(config: Config, provided: Optional[str]) -> None:

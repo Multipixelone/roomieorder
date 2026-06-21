@@ -131,6 +131,7 @@ class DumpResult:
 
     logged_in: bool = False
     challenge: bool = False
+    blocked: bool = False
     html: Optional[Path] = None
     probe: Optional[Path] = None
     screenshot: Optional[Path] = None
@@ -258,6 +259,10 @@ class BasePurchaser(Generic[SourceT]):
     ORDER_TOTAL_SELECTORS: tuple[str, ...] = ()
     SIGNIN_SUBMIT_SELECTORS: tuple[str, ...] = ()
     ACCOUNT_NAV_SELECTORS: tuple[str, ...] = ()
+    # Akamai-style *hard block* markers (a 403 deny page with nothing to solve).
+    # Checked before CHALLENGE_MARKERS; kept disjoint from it. Empty by default,
+    # so a store whose wall is a solvable captcha stays `challenge`.
+    BLOCK_MARKERS: tuple[str, ...] = ()
     CHALLENGE_MARKERS: tuple[str, ...] = ()
     SIGNIN_MARKERS: tuple[str, ...] = ()
     # Sold-out / not-carried / not-found markers that drive the Amazon fallback.
@@ -447,6 +452,8 @@ class BasePurchaser(Generic[SourceT]):
                 resp = page.goto(url, wait_until="domcontentloaded")
                 http_status = resp.status if resp is not None else None
 
+                if self._is_blocked(page):
+                    return self._blocked(page, item_key, "product")
                 if self._is_challenge(page):
                     return self._challenge(page, item_key, "product")
                 # A 404 means the product isn't carried — bail to `unavailable`
@@ -475,6 +482,8 @@ class BasePurchaser(Generic[SourceT]):
                 # after regardless.
                 self._reset_cart(page)
                 page.goto(url, wait_until="domcontentloaded")
+                if self._is_blocked(page):
+                    return self._blocked(page, item_key, "product")
                 if self._is_challenge(page):
                     return self._challenge(page, item_key, "product")
 
@@ -523,6 +532,8 @@ class BasePurchaser(Generic[SourceT]):
                     # a block as "couldn't drive checkout" and falling back to the
                     # other store. The bare no_buy_button is the genuine
                     # cart-drive/selector miss only when it's neither.
+                    if self._is_blocked(page):
+                        return self._blocked(page, item_key, "checkout")
                     if self._is_challenge(page):
                         return self._challenge(page, item_key, "checkout")
                     if self._is_signin(page):
@@ -539,6 +550,8 @@ class BasePurchaser(Generic[SourceT]):
                     )
 
                 page.wait_for_load_state("domcontentloaded")
+                if self._is_blocked(page):
+                    return self._blocked(page, item_key, "checkout")
                 if self._is_signin(page):
                     return self._signin_required(page, item_key, "checkout")
                 if self._is_challenge(page):
@@ -605,6 +618,8 @@ class BasePurchaser(Generic[SourceT]):
                     # operator gets the right next step, not a misleading
                     # "couldn't find Place Order". Settle again so the
                     # diagnostic shot shows the real page, not a blank header.
+                    if self._is_blocked(page):
+                        return self._blocked(page, item_key, "checkout")
                     if self._is_signin(page):
                         return self._signin_required(page, item_key, "checkout")
                     if self._is_challenge(page):
@@ -625,6 +640,8 @@ class BasePurchaser(Generic[SourceT]):
                 submitted = True
 
                 page.wait_for_load_state("domcontentloaded")
+                if self._is_blocked(page):
+                    return self._blocked(page, item_key, "confirm")
                 if self._is_signin(page):
                     return self._signin_required(page, item_key, "confirm")
                 if self._is_challenge(page):
@@ -752,13 +769,15 @@ class BasePurchaser(Generic[SourceT]):
                 pass
             try:
                 page.goto(url, wait_until="domcontentloaded")
+                result.blocked = self._is_blocked(page)
                 result.challenge = self._is_challenge(page)
                 # Sign in if we can so the probe also sees any logged-in-only
                 # controls, but never bail on it — dumping a logged-out page is
                 # still useful for the price selectors (price renders logged out).
-                if not result.challenge and not self.is_logged_in(page):
+                if not result.blocked and not result.challenge and not self.is_logged_in(page):
                     self.ensure_logged_in(page)
                     page.goto(url, wait_until="domcontentloaded")
+                    result.blocked = self._is_blocked(page)
                     result.challenge = self._is_challenge(page)
                 self._settle(page)
                 result.logged_in = self.is_logged_in(page)
@@ -1134,6 +1153,14 @@ class BasePurchaser(Generic[SourceT]):
             except Exception:  # noqa: BLE001 — bounded wait; shoot what painted
                 pass
 
+    def _is_blocked(self, page: "Page") -> bool:
+        try:
+            text = page.locator("body").inner_text(timeout=3_000)
+            url = page.url
+        except Exception:  # noqa: BLE001
+            return False
+        return looks_like(text, url, self.BLOCK_MARKERS)
+
     def _is_challenge(self, page: "Page") -> bool:
         try:
             text = page.locator("body").inner_text(timeout=3_000)
@@ -1152,6 +1179,21 @@ class BasePurchaser(Generic[SourceT]):
         except Exception:  # noqa: BLE001
             text = ""
         return looks_like(text, url, self.SIGNIN_MARKERS)
+
+    def _blocked(self, page: "Page", item_key: str, where: str) -> PurchaseResult:
+        """An Akamai hard block (Access Denied) on the ``where`` page — a
+        fingerprint/IP ban, not a solvable captcha. Pause with a "nothing to
+        click" next step so the operator waits it out / rotates rather than
+        hunting for a challenge to clear (the `challenge` message)."""
+        shot = self._screenshot(page, item_key, f"blocked_{where}")
+        return PurchaseResult(
+            status="blocked",
+            message=(
+                f"⛔ {self.STORE_NAME} blocked the {where} page (Akamai) — worker "
+                "paused; nothing to click, wait it out / rotate fingerprint, then retry"
+            ),
+            screenshot=shot,
+        )
 
     def _challenge(self, page: "Page", item_key: str, where: str) -> PurchaseResult:
         shot = self._screenshot(page, item_key, f"challenge_{where}")
@@ -1286,15 +1328,22 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
         "[data-testid='icon-links-member-links-desktop-account']",
         "[data-testid='search-strip-member-links-desktop-account']",
     )
-    # Costco/Akamai bot wall. TODO(costco): verify against live DOM.
-    CHALLENGE_MARKERS = (
+    # Akamai *hard block* — a 403 "Access Denied" deny page (fingerprint/IP ban).
+    # Nothing to solve in the browser, so it pauses as `blocked` (not `challenge`)
+    # with a "wait it out / rotate" message. Kept disjoint from CHALLENGE_MARKERS
+    # and checked first. TODO(costco): verify against live DOM.
+    BLOCK_MARKERS = (
         "access denied",
+        "reference #",
+        "akamai",
+    )
+    # Costco/Akamai *interactive* bot wall — a captcha/verification a human can
+    # solve, so it pauses as `challenge`. TODO(costco): verify against live DOM.
+    CHALLENGE_MARKERS = (
         "pardon our interruption",
         "verify you are human",
         "are you a human",
         "/_sec/",
-        "akamai",
-        "reference #",
         "recaptcha",
         "enter the characters",
         "verify your identity",

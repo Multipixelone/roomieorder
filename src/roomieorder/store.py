@@ -37,6 +37,10 @@ Status = Literal[
     # the worker pauses and a human confirms against the store account.
     "needs_review",
     "challenge",
+    # Akamai hard block (Access Denied) — a fingerprint/IP ban with nothing to
+    # click. Pauses the worker like `challenge` and is terminal (no fallback);
+    # split out so the operator message says "wait it out" not "clear it".
+    "blocked",
 ]
 
 # Statuses that represent a real, completed money movement for spend accounting.

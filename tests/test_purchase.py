@@ -91,7 +91,9 @@ def test_price_from_jsonld(raw: str, expected: float | None) -> None:
 @pytest.mark.parametrize(
     "text,url,expected",
     [
-        ("Access Denied", "", True),
+        # "Access Denied" is now a *hard block* marker, not a solvable challenge,
+        # so it must NOT match CHALLENGE_MARKERS (see test_looks_like_blocked).
+        ("Access Denied", "", False),
         ("normal product page", "https://www.costco.com/x.product.123.html", False),
         ("", "https://www.costco.com/_sec/verify", True),
         ("Pardon Our Interruption", "", True),
@@ -100,6 +102,55 @@ def test_price_from_jsonld(raw: str, expected: float | None) -> None:
 )
 def test_looks_like_challenge(text: str, url: str, expected: bool) -> None:
     assert looks_like(text, url, CostcoPurchaser.CHALLENGE_MARKERS) is expected
+
+
+@pytest.mark.parametrize(
+    "text,url,expected",
+    [
+        ("Access Denied", "", True),
+        ("Reference #18.abc1234.1700000000.deadbeef", "", True),
+        ("blocked by AkamAI edge", "", True),
+        # Interactive walls are `challenge`, not a hard block.
+        ("Please verify you are human", "", False),
+        ("Pardon Our Interruption", "", False),
+        ("normal product page", "https://www.costco.com/x.product.123.html", False),
+    ],
+)
+def test_looks_like_blocked(text: str, url: str, expected: bool) -> None:
+    assert looks_like(text, url, CostcoPurchaser.BLOCK_MARKERS) is expected
+
+
+def test_block_and_challenge_markers_are_disjoint() -> None:
+    assert not (set(CostcoPurchaser.BLOCK_MARKERS) & set(CostcoPurchaser.CHALLENGE_MARKERS))
+
+
+class _BodyPage:
+    """A page whose ``body`` renders fixed text — enough to drive the block /
+    challenge classifiers (which read ``body.inner_text`` + ``url``)."""
+
+    def __init__(self, body: str, url: str = "") -> None:
+        self._body = body
+        self.url = url
+
+    def locator(self, selector: str) -> "_BodyPage":
+        return self
+
+    def inner_text(self, timeout: int | None = None) -> str:
+        return self._body
+
+
+def test_classifier_splits_block_from_challenge(config: Config) -> None:
+    purchaser = _purchaser(config)
+
+    block = _BodyPage("Access Denied\nReference #18.abc")
+    assert purchaser._is_blocked(block) is True
+    assert purchaser._is_challenge(block) is False
+    assert purchaser._blocked(block, "tp", "checkout").status == "blocked"
+
+    # An interactive captcha is the other branch: a `challenge`, never `blocked`.
+    challenge = _BodyPage("Please verify you are human")
+    assert purchaser._is_blocked(challenge) is False
+    assert purchaser._is_challenge(challenge) is True
 
 
 @pytest.mark.parametrize(
