@@ -285,6 +285,7 @@ def dump_dom(item_key: str, provider: str) -> None:
     click.echo(f"dump-dom {item_key} ({provider}) → {purchaser._resolve_url(source)}")  # type: ignore[attr-defined]
     result = purchaser.dump_dom(item_key, item, source)  # type: ignore[attr-defined]
     click.echo(f"logged_in:  {result.logged_in}")
+    click.echo(f"blocked:    {result.blocked}")
     click.echo(f"challenge:  {result.challenge}")
     click.echo(f"html:       {result.html}")
     click.echo(f"probe:      {result.probe}")
@@ -298,6 +299,7 @@ _TROUBLE_STATUSES = (
     "failed",
     "needs_review",
     "challenge",
+    "blocked",
     "spend_capped",
     "price_blocked",
     "unavailable",
@@ -388,8 +390,10 @@ def verify_selectors(item_key: Optional[str], provider: str) -> None:
         cart_ok = hits.get(cart_group, False) or hits.get("add-to-cart", False)
         price_ok = price is not None or hits.get("price", False) or hits.get("price-meta", False)
 
-        if result.challenge:
-            verdict = "CHALLENGE (can't verify — blocked)"
+        if result.blocked:
+            verdict = "BLOCKED (Akamai — can't verify; wait it out / rotate)"
+        elif result.challenge:
+            verdict = "CHALLENGE (can't verify — clear it manually)"
         elif not result.logged_in and not price_ok:
             verdict = "LOGGED-OUT (sign in, then retry)"
         elif price_ok and cart_ok:

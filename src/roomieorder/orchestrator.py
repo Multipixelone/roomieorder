@@ -7,8 +7,8 @@ order: sold out, not carried / not found, or over that store's price ceiling.
 
 A successful fallback returns ``placed`` (with ``provider="amazon"``), so the
 worker's pause/cooldown/spend logic — which keys off ``placed`` — is untouched.
-Statuses that mean "a human must intervene" (``challenge``, ``failed``,
-``spend_capped``) are terminal and never trigger a fallback.
+Statuses that mean "a human must intervene" (``challenge``, ``blocked``,
+``failed``, ``spend_capped``) are terminal and never trigger a fallback.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ Source = Union[CostcoSource, AmazonSource]
 _logger = logging.getLogger(__name__)
 
 # Outcomes from a non-final store that mean "try the next one". Everything else
-# (placed, dry_run, challenge, failed, spend_capped) is terminal.
+# (placed, dry_run, challenge, blocked, failed, spend_capped) is terminal.
 _FALLBACK_STATUSES = {"unavailable", "price_blocked"}
 
 
