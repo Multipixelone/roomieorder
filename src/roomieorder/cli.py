@@ -212,15 +212,28 @@ def login(provider: str) -> None:
 
     def wait_for_operator(page: object) -> None:
         click.echo(f"opened {purchaser.domain} on profile {purchaser.profile_dir}")  # type: ignore[attr-defined]
-        click.pause(info="log in, then press any key here to save the session and close…")
-        if purchaser.is_logged_in(page):  # type: ignore[attr-defined]
-            click.echo("✓ signed in — session saved to the profile")
-        else:
-            click.echo(
-                f"⚠️  still looks signed out — re-run `roomieorder login --provider {provider}`"
+        click.pause(
+            info=(
+                "log in normally — roomieorder keeps the session signed in for "
+                "you — then press any key here once the page shows you signed in…"
             )
+        )
 
     purchaser.login(wait_for_operator)  # type: ignore[attr-defined]
+
+    # The in-window check can't tell a persisted session from one that only lives
+    # in memory until the browser closes (Amazon's session-scoped auth cookies),
+    # so reload the saved profile from disk and verify there — that is the state
+    # the worker will actually launch into, and a logged-in reload is the proof
+    # the persistent ("remember me") cookies were written.
+    if purchaser.verify_session():  # type: ignore[attr-defined]
+        click.echo("✓ signed in — session persisted (survives restarts and the worker)")
+    else:
+        click.echo(
+            "⚠️  the saved profile reloads signed OUT — the session didn’t persist. "
+            f"Re-run `roomieorder login --provider {provider}`; if it recurs, the "
+            "sign-in form’s rememberMe field needs re-capturing."
+        )
 
 
 @main.command(name="dry-run")

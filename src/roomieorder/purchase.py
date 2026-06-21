@@ -889,6 +889,14 @@ class BasePurchaser(Generic[SourceT]):
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         with api.sync_playwright() as pw:  # type: ignore[attr-defined]
             context = self._launch_context(pw)
+            # Apply any store-specific login tweak to every document in this
+            # context *before* the first navigation — Amazon forces the
+            # "Keep me signed in" (rememberMe) param so the auth cookies persist.
+            # Scoped to login only: the buy/dump contexts never inject JS into the
+            # store's (Akamai-fronted) pages.
+            script = self._login_init_script()
+            if script:
+                context.add_init_script(script)
             page = context.pages[0] if context.pages else context.new_page()
             try:
                 page.goto(
@@ -896,6 +904,44 @@ class BasePurchaser(Generic[SourceT]):
                     wait_until="domcontentloaded",
                 )
                 wait_for_operator(page)
+            finally:
+                context.close()
+
+    def _login_init_script(self) -> Optional[str]:
+        """JS injected on every document during ``login`` only. Base: none.
+
+        Stores that need to nudge the hand-login (e.g. force a persistent-session
+        form param) override this; the buy/dump flows never inject."""
+        return None
+
+    def verify_session(self) -> bool:
+        """Relaunch the saved profile from disk and report if it reloads signed in.
+
+        ``login``'s own in-window ``is_logged_in`` check passes the instant the
+        operator signs in, but that reads cookies still live in memory — it can't
+        see whether they were *persisted*. Amazon issues its auth cookies
+        (``at-main``/``x-main``) as **session** cookies unless "Keep me signed in"
+        (the ``rememberMe`` form param ``login`` now forces) is set, and Chrome
+        never flushes session cookies to the on-disk profile — so without it a
+        session that looked signed-in live reloads signed-out and the worker hits
+        the sign-in wall. This closes the loop honestly: a fresh persistent-context
+        launch reads cookies from disk, so a logged-in reload here *is* the proof
+        the persistent cookies were written — i.e. that ``rememberMe`` took and
+        the next run (the worker) will be logged in.
+        """
+        api = _playwright_api()
+        with api.sync_playwright() as pw:  # type: ignore[attr-defined]
+            context = self._launch_context(pw)
+            page = context.pages[0] if context.pages else context.new_page()
+            try:
+                page.goto(
+                    f"https://www.{self.domain}",
+                    wait_until="domcontentloaded",
+                )
+                self._settle(page)
+                return self.ensure_logged_in(page)
+            except Exception:  # noqa: BLE001 — couldn't reload; treat as unverified
+                return False
             finally:
                 context.close()
 
@@ -1682,6 +1728,67 @@ class AmazonPurchaser(BasePurchaser[AmazonSource]):
 
     def _source_label(self, source: AmazonSource) -> str:
         return f"ASIN {source.asin}"
+
+    # ─────────── session persistence ───────────
+    # Amazon issues its auth cookies (at-main/x-main/sess-at-main) as *session*
+    # cookies unless "Keep me signed in" is set, and Chrome never flushes session
+    # cookies to the on-disk profile — so a hand-login that looks signed-in
+    # reloads signed-out and the worker hits the sign-in wall. That checkbox is
+    # just UI for the server-side ``rememberMe=true`` param on POST /ap/signin, and
+    # Amazon A/B-tests it away (it isn't rendered on every flow). So instead of
+    # depending on the box, force the param during login: whenever a sign-in form
+    # appears we tick an existing rememberMe control or inject a hidden
+    # rememberMe=true input, so the operator's submit carries it. Amazon then
+    # issues *persistent* at-main/x-main cookies, which Chrome stores in the
+    # profile the normal way — no cookie juggling, rolling lifetime of months.
+
+    def _remember_me_js(self) -> str:
+        """Core ``ensureRememberMe()`` — tick/inject the rememberMe form param.
+
+        Returned separately from the init-script bootstrap so the offline
+        browser-fixture net can ``page.evaluate`` it against a static sign-in
+        form and assert the resulting DOM."""
+        return """
+        function ensureRememberMe() {
+          var box = document.querySelector('input[name="rememberMe"]');
+          if (box) {
+            if (!box.checked) {
+              box.checked = true;
+              box.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            console.debug('[roomieorder] rememberMe: checked existing box');
+            return;
+          }
+          var form = document.querySelector(
+            'form[name="signIn"], form[action*="/ap/signin"]'
+          );
+          if (form && !form.querySelector('input[name="rememberMe"]')) {
+            var hidden = document.createElement('input');
+            hidden.type = 'hidden';
+            hidden.name = 'rememberMe';
+            hidden.value = 'true';
+            form.appendChild(hidden);
+            console.debug('[roomieorder] rememberMe: injected hidden input');
+          }
+        }
+        """
+
+    def _login_init_script(self) -> Optional[str]:
+        # Run ensureRememberMe now, on DOMContentLoaded, and from a
+        # MutationObserver — the operator may reach the password form via a late
+        # or SPA-rendered step, so a one-shot run can miss it.
+        return (
+            self._remember_me_js()
+            + """
+        ensureRememberMe();
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', ensureRememberMe);
+        }
+        new MutationObserver(ensureRememberMe).observe(
+          document.documentElement, { childList: true, subtree: true }
+        );
+        """
+        )
 
     def _start_checkout(self, page: "Page") -> bool:
         """Click Buy Now; fall back to Add to Cart → Proceed to checkout.

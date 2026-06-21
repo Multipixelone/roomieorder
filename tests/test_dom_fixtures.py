@@ -26,7 +26,7 @@ from playwright.sync_api import Page
 
 from roomieorder.cli import _group_hits, _read_price_from_summary
 from roomieorder.config import Config
-from roomieorder.purchase import CostcoPurchaser
+from roomieorder.purchase import AmazonPurchaser, CostcoPurchaser
 
 pytestmark = pytest.mark.browser
 
@@ -41,6 +41,17 @@ def _costco(config: Config) -> CostcoPurchaser:
     return CostcoPurchaser(
         config, profile_dir=config.costco_profile_dir, domain=config.costco_domain
     )
+
+
+def _amazon(config: Config) -> AmazonPurchaser:
+    return AmazonPurchaser(
+        config, profile_dir=config.amazon_profile_dir, domain=config.amazon_domain
+    )
+
+
+def _run_remember_me(page: Page, config: Config) -> None:
+    """Replay the real `ensureRememberMe()` against whatever form `page` holds."""
+    page.evaluate("() => {" + _amazon(config)._remember_me_js() + "ensureRememberMe();}")
 
 
 def _group_resolves(page: Page, selectors: tuple[str, ...]) -> bool:
@@ -154,3 +165,68 @@ def test_checkout_selector_groups_resolve(
     assert _group_resolves(page, CostcoPurchaser.PAYMENT_METHOD_SELECTORS)
     assert _group_resolves(page, CostcoPurchaser.ORDER_TOTAL_SELECTORS)
     assert purchaser._read_total(page) is not None
+
+
+# ─────────── amazon rememberMe (login persistence) ───────────
+# `ensureRememberMe()` is what makes Amazon issue *persistent* auth cookies. The
+# logic (tick an existing box, else inject a hidden field) is asserted here
+# against synthetic sign-in markup through the real DOM engine — kept inline, not
+# in fixtures/dom/, which is reserved for real `dump-dom` captures. The drift net
+# against Amazon's *actual* /ap/signin markup is the skip-slot test below.
+
+_SIGNIN_FORM_WITH_BOX = """
+<form name="signIn" action="/ap/signin">
+  <input type="email" name="email">
+  <input type="password" name="password">
+  <input type="checkbox" name="rememberMe">
+  <input id="signInSubmit" type="submit">
+</form>
+"""
+
+_SIGNIN_FORM_NO_BOX = """
+<form name="signIn" action="/ap/signin">
+  <input type="email" name="email">
+  <input type="password" name="password">
+  <input id="signInSubmit" type="submit">
+</form>
+"""
+
+
+def test_remember_me_ticks_existing_box(config: Config, page: Page) -> None:
+    """When Amazon renders the checkbox, ensureRememberMe checks it."""
+    page.set_content(_SIGNIN_FORM_WITH_BOX)
+    assert page.locator('input[name="rememberMe"]').is_checked() is False
+    _run_remember_me(page, config)
+    assert page.locator('input[name="rememberMe"]').is_checked() is True
+
+
+def test_remember_me_injects_when_box_absent(config: Config, page: Page) -> None:
+    """When the box is A/B-tested away, ensureRememberMe injects rememberMe=true
+    into the sign-in form so the operator's submit still carries the param."""
+    page.set_content(_SIGNIN_FORM_NO_BOX)
+    assert page.locator('input[name="rememberMe"]').count() == 0
+    _run_remember_me(page, config)
+    injected = page.locator('form[name="signIn"] input[name="rememberMe"]')
+    assert injected.count() == 1
+    assert injected.get_attribute("value") == "true"
+
+
+def test_remember_me_skips_when_no_form(config: Config, page: Page) -> None:
+    """No sign-in form on the page → nothing injected (don't litter the DOM)."""
+    page.set_content("<div>not a login page</div>")
+    _run_remember_me(page, config)
+    assert page.locator('input[name="rememberMe"]').count() == 0
+
+
+# ─────────── real /ap/signin markup (skips until a scrubbed capture is committed) ───────────
+
+
+def test_remember_me_drives_real_signin_form(
+    config: Config, page: Page, dom_fixture: Callable[[str], str]
+) -> None:
+    """Drift net against Amazon's real password page: capture a sanitized
+    /ap/signin form as `amazon_signin_form.html` and this proves rememberMe is
+    set on the genuine markup. Skips until that capture lands."""
+    page.set_content(dom_fixture("amazon_signin_form.html"))
+    _run_remember_me(page, config)
+    assert page.locator('input[name="rememberMe"]').count() >= 1
