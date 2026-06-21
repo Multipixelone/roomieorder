@@ -86,6 +86,12 @@ class Config(BaseModel):
     # Stores
     costco_domain: str = "costco.com"
     amazon_domain: str = "amazon.com"
+    # Costco WebSphere warehouse/catalog ids, stamped into the silent SSO
+    # re-auth URL (see purchase.CostcoPurchaser.ensure_logged_in). The defaults
+    # are the values verified live 2026-06-17; a different warehouse/region needs
+    # its own ids or the silent re-auth bounces.
+    costco_store_id: str = "10301"
+    costco_catalog_id: str = "10701"
     wayland: bool = False
 
     # Browser / anti-bot. Akamai fingerprints the *real* browser build, so the
@@ -108,6 +114,14 @@ class Config(BaseModel):
     openclaw_bin: str = "openclaw"
     openclaw_target: str = ""
     openclaw_channel: str = "telegram"
+
+    # Auto-retry for pre-cart transient failures (network timeout reaching the
+    # PDP, a one-off no_price) — money-safe because the cart is never touched.
+    # Off by default so behavior is unchanged; the worker bounds re-enqueues per
+    # item to ``auto_retry_max`` (see main.Engine). Failures at or past the cart
+    # are never retryable regardless of this flag.
+    auto_retry: bool = False
+    auto_retry_max: int = Field(default=1, ge=0)
 
     @property
     def sheets_enabled(self) -> bool:
@@ -168,6 +182,8 @@ def load_config() -> Config:
         shots_dir=Path(_env_str("ROOMIEORDER_SHOTS_DIR", "data/shots")),
         costco_domain=_env_str("ROOMIEORDER_COSTCO_DOMAIN", "costco.com"),
         amazon_domain=_env_str("ROOMIEORDER_AMAZON_DOMAIN", "amazon.com"),
+        costco_store_id=_env_str("ROOMIEORDER_COSTCO_STORE_ID", "10301"),
+        costco_catalog_id=_env_str("ROOMIEORDER_COSTCO_CATALOG_ID", "10701"),
         wayland=_env_bool("ROOMIEORDER_WAYLAND", False),
         chrome_path=_env_str("ROOMIEORDER_CHROME_PATH", ""),
         chrome_channel=_env_str("ROOMIEORDER_CHROME_CHANNEL", "chrome"),
@@ -177,4 +193,6 @@ def load_config() -> Config:
         openclaw_bin=_env_str("OPENCLAW_BIN", "openclaw"),
         openclaw_target=_env_str("OPENCLAW_TARGET", ""),
         openclaw_channel=_env_str("OPENCLAW_CHANNEL", "telegram"),
+        auto_retry=_env_bool("ROOMIEORDER_AUTO_RETRY", False),
+        auto_retry_max=_env_int("ROOMIEORDER_AUTO_RETRY_MAX", 1),
     )

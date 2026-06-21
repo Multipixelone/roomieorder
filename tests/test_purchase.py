@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import pytest
 
+from roomieorder.catalog import load_catalog
 from roomieorder.config import Config
 from roomieorder.purchase import (
     _JSONLD_SELECTOR,
@@ -105,19 +106,35 @@ def test_looks_like_challenge(text: str, url: str, expected: bool) -> None:
 
 
 @pytest.mark.parametrize(
-    "text,url,expected",
+    "body,expected",
     [
-        ("Access Denied", "", True),
-        ("Reference #18.abc1234.1700000000.deadbeef", "", True),
-        ("blocked by AkamAI edge", "", True),
+        # The real Akamai deny page carries BOTH markers — only their co-occurrence
+        # is a hard block now (tightened to stop benign single-marker false blocks).
+        ("Access Denied\nReference #18.abc1234.1700000000.deadbeef", True),
+        # A lone marker is no longer a block: an order/help page mentioning a
+        # "Reference #", or "Access Denied" copy without the Akamai reference id.
+        ("Reference #18.abc1234.1700000000.deadbeef", False),
+        ("Access Denied — you can't view this member-only deal", False),
+        ("blocked by AkamAI edge", False),
         # Interactive walls are `challenge`, not a hard block.
-        ("Please verify you are human", "", False),
-        ("Pardon Our Interruption", "", False),
-        ("normal product page", "https://www.costco.com/x.product.123.html", False),
+        ("Please verify you are human", False),
+        ("Pardon Our Interruption", False),
+        ("normal product page", False),
     ],
 )
-def test_looks_like_blocked(text: str, url: str, expected: bool) -> None:
-    assert looks_like(text, url, CostcoPurchaser.BLOCK_MARKERS) is expected
+def test_is_blocked_requires_marker_cooccurrence(
+    config: Config, body: str, expected: bool
+) -> None:
+    purchaser = _purchaser(config)
+    assert purchaser._is_blocked(_BodyPage(body)) is expected
+
+
+@pytest.mark.parametrize("status,expected", [(403, True), (429, True), (200, False), (404, False), (None, False)])
+def test_is_blocked_keys_on_http_status(config: Config, status: int | None, expected: bool) -> None:
+    # A 403/429 is the primary, drift-proof block signal — true even when the body
+    # carries no deny markers (an Akamai deny page that didn't paint its text yet).
+    purchaser = _purchaser(config)
+    assert purchaser._is_blocked(_BodyPage("nothing to see"), status) is expected
 
 
 def test_block_and_challenge_markers_are_disjoint() -> None:
@@ -640,6 +657,115 @@ def test_reset_cart_is_base_noop_for_amazon(config: Config) -> None:
     # Amazon's Buy-Now path doesn't use the shared cart; the base hook does
     # nothing and must never raise.
     _amazon(config)._reset_cart(object())
+
+
+# ─────────── cart-singleton guard (verify only our item before placing) ───────────
+
+
+class _ReviewLineLocator:
+    def __init__(self, page: "_ReviewPage", selector: str) -> None:
+        self._page = page
+        self._selector = selector
+
+    @property
+    def first(self) -> "_ReviewLineLocator":
+        return self
+
+    def count(self) -> int:
+        # Only the first CART_LINE_SELECTORS candidate resolves; ``lines=None``
+        # models every candidate missing (selector drift).
+        if self._page.lines is None:
+            return 0
+        return self._page.lines if self._selector == CostcoPurchaser.CART_LINE_SELECTORS[0] else 0
+
+
+class _ReviewPage:
+    """Review page exposing a fixed cart-line count for _verify_cart_singleton."""
+
+    def __init__(self, lines: int | None) -> None:
+        self.lines = lines
+        self.url = "https://www.costco.com/SinglePageCheckoutView"
+
+    def locator(self, selector: str) -> _ReviewLineLocator:
+        return _ReviewLineLocator(self, selector)
+
+    def screenshot(self, path: str | None = None, full_page: bool = False) -> None:
+        return None
+
+
+def _costco_item(config: Config, key: str = "paper_towels"):  # type: ignore[no-untyped-def]
+    items = load_catalog(config.catalog_path)
+    item = items[key]
+    return item, item.costco
+
+
+def test_cart_guard_passes_single_line_in_band(config: Config) -> None:
+    # One line on the review page and a total within the tax/shipping band → place.
+    item, source = _costco_item(config)  # qty 1, expected $24.99
+    res = _purchaser(config)._verify_cart_singleton(
+        _ReviewPage(lines=1), "paper_towels", item, source, 24.99, 27.50
+    )
+    assert res is None
+
+
+def test_cart_guard_aborts_on_extra_line(config: Config) -> None:
+    # A stale extra line _reset_cart didn't drain → never place; needs_review.
+    item, source = _costco_item(config)
+    res = _purchaser(config)._verify_cart_singleton(
+        _ReviewPage(lines=2), "paper_towels", item, source, 24.99, 49.98
+    )
+    assert res is not None and res.status == "needs_review"
+
+
+def test_cart_guard_aborts_on_total_over_band(config: Config) -> None:
+    # Even with a single readable line, a total far over the band (an extra line
+    # the line selector didn't see) aborts. ceiling = 24.99*1.30 + 15 = $47.49.
+    item, source = _costco_item(config)
+    res = _purchaser(config)._verify_cart_singleton(
+        _ReviewPage(lines=1), "paper_towels", item, source, 24.99, 60.00
+    )
+    assert res is not None and res.status == "needs_review"
+
+
+def test_cart_guard_fails_closed_when_unverifiable(config: Config) -> None:
+    # Neither a line count nor a total is readable → can't verify → fail closed.
+    item, source = _costco_item(config)
+    res = _purchaser(config)._verify_cart_singleton(
+        _ReviewPage(lines=None), "paper_towels", item, source, 24.99, None
+    )
+    assert res is not None and res.status == "needs_review"
+
+
+def test_cart_guard_passes_in_band_without_line_selectors(config: Config) -> None:
+    # Line selectors miss, but the (live-verified) total is in band → verified.
+    item, source = _costco_item(config)
+    res = _purchaser(config)._verify_cart_singleton(
+        _ReviewPage(lines=None), "paper_towels", item, source, 24.99, 30.00
+    )
+    assert res is None
+
+
+def test_cart_guard_band_scales_with_qty(config: Config) -> None:
+    # dish_soap qty=2 @ $11.99 → subtotal $23.98, ceiling 23.98*1.30+15 ≈ $46.17.
+    item, source = _costco_item(config, "dish_soap")
+    ok = _purchaser(config)._verify_cart_singleton(
+        _ReviewPage(lines=1), "dish_soap", item, source, 11.99, 26.00
+    )
+    assert ok is None
+    over = _purchaser(config)._verify_cart_singleton(
+        _ReviewPage(lines=1), "dish_soap", item, source, 11.99, 80.00
+    )
+    assert over is not None and over.status == "needs_review"
+
+
+def test_cart_guard_base_hook_is_noop_for_amazon(config: Config) -> None:
+    # Amazon's Buy-Now path never touches the shared cart, so the base hook is a
+    # no-op (None) regardless of the totals — it must never abort the fallback.
+    item, source = _costco_item(config)
+    assert (
+        _amazon(config)._verify_cart_singleton(object(), "x", item, source, 99.0, 999.0)
+        is None
+    )
 
 
 # ─────────── Amazon checkout (the fallback flow) ───────────

@@ -125,6 +125,12 @@ class Engine:
         self.orchestrator = Orchestrator(config, self.store)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Per-item count of consecutive opt-in auto-retries (ROOMIEORDER_AUTO_RETRY),
+        # bounding how many times a money-safe pre-cart failure is re-driven before
+        # the worker gives up and pauses. In-memory is fine: the worker is
+        # single-threaded and these are transient PDP-load failures, so a restart
+        # resetting the count is harmless (recover_stale covers in-progress rows).
+        self._transient_attempts: dict[str, int] = {}
         self._recover_orphans()
 
     def _recover_orphans(self) -> None:
@@ -199,11 +205,45 @@ class Engine:
         self._log_sheet(row, item, result)
         self.notifier.send(result.message, photo=result.screenshot)
 
+        # A money-safe pre-cart failure (no cart interaction, no order placed) can
+        # be re-driven rather than pausing for manual `retry` — opt-in and bounded.
+        if result.status == "failed" and self._maybe_auto_retry(row, result):
+            return
+        # Any settled, non-auto-retried outcome clears the transient counter so
+        # the next independent request for this item starts fresh.
+        self._transient_attempts.pop(row.item_key, None)
+
         if result.status in _PAUSE_STATUSES:
             self.store.set_paused(True, result.message)
             _logger.warning("worker paused: %s", result.message)
         elif result.status == "placed":
             self._enforce_recorded_cap()
+
+    def _maybe_auto_retry(self, row: QueueRow, result: PurchaseResult) -> bool:
+        """Re-enqueue a money-safe transient failure instead of pausing.
+
+        Only fires when ``ROOMIEORDER_AUTO_RETRY`` is on and the result is flagged
+        ``retryable`` — set exclusively for failures strictly before any cart
+        interaction (a PDP-load timeout, a one-off no_price), never once the cart
+        was touched or an order submitted (see purchase.BasePurchaser.buy). Bounds
+        re-drives per item to ``auto_retry_max`` so a persistently-failing item
+        still ends up paused rather than looping. Returns True when it re-enqueued
+        (caller skips the pause path)."""
+        if not (self.config.auto_retry and result.retryable):
+            return False
+        count = self._transient_attempts.get(row.item_key, 0)
+        if count >= self.config.auto_retry_max:
+            return False
+        self._transient_attempts[row.item_key] = count + 1
+        new_id = self.store.enqueue(row.item_key, row.requester)
+        _logger.info(
+            "auto-retry %s: transient pre-cart failure (%d/%d) — re-enqueued as #%d",
+            row.item_key,
+            count + 1,
+            self.config.auto_retry_max,
+            new_id,
+        )
+        return True
 
     def _enforce_recorded_cap(self) -> None:
         """Backstop the spend cap against *recorded* totals after a placed order.

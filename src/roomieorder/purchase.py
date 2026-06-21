@@ -120,6 +120,13 @@ class PurchaseResult:
     provider: str = ""
     message: str = ""
     screenshot: Optional[Path] = None
+    # True only for a `failed` that happened strictly *before* any cart
+    # interaction (a transient PDP-load timeout, a one-off no_price) — money-safe
+    # to re-drive because nothing was added to the cart and no order was placed.
+    # Never set once the checkout/cart flow has run or an order was submitted, so
+    # the worker's opt-in auto-retry (main.Engine) can't re-drive a money-adjacent
+    # failure. See BasePurchaser.buy.
+    retryable: bool = False
 
 
 @dataclass
@@ -318,6 +325,24 @@ class BasePurchaser(Generic[SourceT]):
         do nothing."""
         return None
 
+    def _verify_cart_singleton(
+        self,
+        page: "Page",
+        item_key: str,
+        item: CatalogItem,
+        source: SourceT,
+        price: Optional[float],
+        review_total: Optional[float],
+    ) -> Optional[PurchaseResult]:
+        """Confirm the review page holds only the intended item before placing.
+
+        Returns ``None`` to proceed, or a ``needs_review`` result to abort the
+        buy *before* Place Order. Base: no-op (``None``) — only a store with a
+        shared, server-side cart that checks out its whole contents (Costco)
+        needs to guard against a stale extra line. Amazon's Buy-Now path orders
+        a single item directly, so it never overrides this."""
+        return None
+
     def is_logged_in(self, page: "Page") -> bool:
         """Best-effort sign-in check via the store's account nav.
 
@@ -451,6 +476,10 @@ class BasePurchaser(Generic[SourceT]):
             # invite a re-order of an order that may have gone through); they all
             # route to `needs_review` for a human to confirm.
             submitted = False
+            # Flips True the moment we begin driving add-to-cart → checkout. Past
+            # it a `failed`/`timeout`/`crash` is no longer money-safe to auto-retry
+            # (the cart may hold our line), so `retryable` stays False from here on.
+            cart_touched = False
             # The order total only appears on the *review* page — Costco's
             # CheckoutConfirmationView_v2 shows just an order number — so it's
             # read there (before Place Order) and carried down to the result.
@@ -459,7 +488,7 @@ class BasePurchaser(Generic[SourceT]):
                 resp = page.goto(url, wait_until="domcontentloaded")
                 http_status = resp.status if resp is not None else None
 
-                if self._is_blocked(page):
+                if self._is_blocked(page, http_status):
                     return self._blocked(page, item_key, "product")
                 if self._is_challenge(page):
                     return self._challenge(page, item_key, "product")
@@ -488,8 +517,9 @@ class BasePurchaser(Generic[SourceT]):
                 # cart (base). Best-effort — it navigates away, so reload the PDP
                 # after regardless.
                 self._reset_cart(page)
-                page.goto(url, wait_until="domcontentloaded")
-                if self._is_blocked(page):
+                resp = page.goto(url, wait_until="domcontentloaded")
+                http_status = resp.status if resp is not None else http_status
+                if self._is_blocked(page, http_status):
                     return self._blocked(page, item_key, "product")
                 if self._is_challenge(page):
                     return self._challenge(page, item_key, "product")
@@ -515,10 +545,13 @@ class BasePurchaser(Generic[SourceT]):
                 price = self._read_price(page)
                 if price is None:
                     shot = self._screenshot(page, item_key, "no_price")
+                    # Pre-cart and money-safe: a missed price often races a slow
+                    # PDP hydration, so let the worker's opt-in auto-retry re-drive.
                     return PurchaseResult(
                         status="failed",
                         message=f"couldn't read a price for {title}",
                         screenshot=shot,
+                        retryable=True,
                     )
 
                 decision = proceed_check(price)
@@ -532,6 +565,9 @@ class BasePurchaser(Generic[SourceT]):
                     )
 
                 # ── reach the review page ──
+                # From here we drive add-to-cart, so a later failure is no longer
+                # money-safe to auto-retry.
+                cart_touched = True
                 if not self._start_checkout(page):
                     # A failure here means we never confirmed the review page. An
                     # Akamai block or a sign-in bounce mid-drive lands here too, so
@@ -594,6 +630,20 @@ class BasePurchaser(Generic[SourceT]):
                 # bounded window the landing check uses before reading.
                 self._wait_for_any(page, self.ORDER_TOTAL_SELECTORS, timeout=self._LANDING_TIMEOUT_MS)
                 review_total = self._read_total(page)
+
+                # ── hard cart-contents guard (⚠️ real money) ──
+                # A live Place Order checks out the *whole* cart, and _reset_cart
+                # is best-effort + silent on failure, so verify the review page
+                # reflects only our item+qty before placing. Runs on dry-run too,
+                # so `dry-run` exercises the guard. A mismatch (or an unverifiable
+                # cart) aborts to needs_review *before* submitted=True — a clean,
+                # double-order-free stop. Base hook is a no-op; only Costco (shared
+                # server-side cart) enforces it.
+                mismatch = self._verify_cart_singleton(
+                    page, item_key, item, source, price, review_total
+                )
+                if mismatch is not None:
+                    return mismatch
 
                 # ── DRY_RUN stops here ──
                 if self.config.dry_run:
@@ -691,7 +741,12 @@ class BasePurchaser(Generic[SourceT]):
                         page, item_key, detail, order_total=review_total
                     )
                 shot = self._screenshot(page, item_key, "timeout")
-                return PurchaseResult(status="failed", message=detail, screenshot=shot)
+                return PurchaseResult(
+                    status="failed",
+                    message=detail,
+                    screenshot=shot,
+                    retryable=not cart_touched,
+                )
             except _BUG_EXCEPTIONS:
                 # A programmer error (bad attr/type/name, missing override, …).
                 # Screenshot for context, then re-raise so it can't hide as
@@ -707,7 +762,12 @@ class BasePurchaser(Generic[SourceT]):
                         page, item_key, detail, order_total=review_total
                     )
                 shot = self._screenshot(page, item_key, "crash")
-                return PurchaseResult(status="failed", message=detail, screenshot=shot)
+                return PurchaseResult(
+                    status="failed",
+                    message=detail,
+                    screenshot=shot,
+                    retryable=not cart_touched,
+                )
             finally:
                 context.close()
 
@@ -1143,6 +1203,28 @@ class BasePurchaser(Generic[SourceT]):
             screenshot=shot,
         )
 
+    def _cart_mismatch(
+        self, page: "Page", item_key: str, detail: str
+    ) -> PurchaseResult:
+        """The review page didn't reflect only our item — abort, never place.
+
+        Reached *before* Place Order, so this is a clean, double-order-free stop:
+        the cart guard (``_verify_cart_singleton``) saw an extra line, a total
+        over the expected band, or couldn't verify the cart at all. Returns a
+        pausing ``needs_review`` so a human drains the cart / confirms before
+        anything re-orders, with a ``cart_mismatch`` screenshot of the review
+        page."""
+        shot = self._screenshot(page, item_key, "cart_mismatch")
+        return PurchaseResult(
+            status="needs_review",
+            message=(
+                f"⚠️ {self.STORE_NAME}: cart contents didn't verify as the single "
+                f"intended item — NOT placed; check the cart before re-ordering "
+                f"({detail})"
+            ),
+            screenshot=shot,
+        )
+
     def _read_total(self, page: "Page") -> Optional[float]:
         """First parseable amount from ``ORDER_TOTAL_SELECTORS``, or None.
 
@@ -1234,13 +1316,34 @@ class BasePurchaser(Generic[SourceT]):
             except Exception:  # noqa: BLE001 — bounded wait; shoot what painted
                 pass
 
-    def _is_blocked(self, page: "Page") -> bool:
+    # HTTP statuses that are an Akamai hard block on their own — a 403 deny page
+    # or a 429 rate-limit — regardless of body text. The drift-proof primary
+    # signal; body markers only corroborate.
+    _BLOCK_STATUS_CODES = (403, 429)
+
+    def _is_blocked(self, page: "Page", http_status: Optional[int] = None) -> bool:
+        """True on an Akamai hard block: a 403/429 response, or the deny page's
+        co-occurring body markers.
+
+        The HTTP status is the reliable signal (the Access Denied and rate-limit
+        pages both return 403/429), so it's checked first. Body markers in
+        ``BLOCK_MARKERS`` must *all* co-occur — the real Akamai deny page carries
+        both "Access Denied" and a "Reference #" — so a benign page mentioning
+        just one (an order's "Reference #", a help article naming Akamai) no
+        longer false-blocks and needlessly pauses the worker. ``http_status`` is
+        only known at the initial product navigation; later checkout/confirm
+        calls pass ``None`` and rely on the co-occurring markers."""
+        if http_status in self._BLOCK_STATUS_CODES:
+            return True
+        if not self.BLOCK_MARKERS:
+            return False
         try:
             text = page.locator("body").inner_text(timeout=3_000)
             url = page.url
         except Exception:  # noqa: BLE001
             return False
-        return looks_like(text, url, self.BLOCK_MARKERS)
+        haystack = f"{text}\n{url}".lower()
+        return all(marker in haystack for marker in self.BLOCK_MARKERS)
 
     def _is_challenge(self, page: "Page") -> bool:
         try:
@@ -1391,6 +1494,18 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
         ".order-total .value",
         ".grand-total .value",
     )
+    # Per-line rows on the SinglePageCheckoutView review page — the cart-singleton
+    # guard counts these to confirm only our item is being checked out. The legacy
+    # WebSphere checkout renders order lines with automation-id/order-item markup;
+    # these are best guesses. TODO(costco): verify against live DOM via dump-dom.
+    # Unverified-and-absent is handled safely: the guard falls back to the
+    # (live-verified) order-total band and, failing that, fails closed.
+    CART_LINE_SELECTORS = (
+        "[automation-id^='orderItemLine_']",
+        "[automation-id^='lineItem_']",
+        ".order-item",
+        ".line-item-detail",
+    )
     # Legacy logon-form submit control. No longer used by the buy flow: Costco's
     # re-auth is a silent SSO redirect (see ensure_logged_in), not a typed form,
     # so there's no submit button to click. Kept only for the dump-dom probe.
@@ -1409,14 +1524,18 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
         "[data-testid='icon-links-member-links-desktop-account']",
         "[data-testid='search-strip-member-links-desktop-account']",
     )
-    # Akamai *hard block* — a 403 "Access Denied" deny page (fingerprint/IP ban).
-    # Nothing to solve in the browser, so it pauses as `blocked` (not `challenge`)
-    # with a "wait it out / rotate" message. Kept disjoint from CHALLENGE_MARKERS
-    # and checked first. TODO(costco): verify against live DOM.
+    # Akamai *hard block* body signature — a 403 "Access Denied" deny page
+    # (fingerprint/IP ban). ALL markers must co-occur (see _is_blocked): the real
+    # deny page carries both "Access Denied" and a "Reference #", so requiring
+    # both stops a benign page that merely mentions one (an order's "Reference #")
+    # from false-blocking. The 403/429 status is the primary signal; this body
+    # check only corroborates when the status isn't known. Nothing to solve in
+    # the browser, so it pauses as `blocked` (not `challenge`) with a "wait it out
+    # / rotate" message. Kept disjoint from CHALLENGE_MARKERS. Verified live
+    # 2026-06-17 (Access Denied + Reference # co-occur on the deny page).
     BLOCK_MARKERS = (
         "access denied",
         "reference #",
-        "akamai",
     )
     # Costco/Akamai *interactive* bot wall — a captcha/verification a human can
     # solve, so it pauses as `challenge`. TODO(costco): verify against live DOM.
@@ -1526,7 +1645,9 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
             return True
         try:
             page.goto(
-                f"https://www.{self.domain}/LogonForm?langId=-1&storeId=10301&catalogId=10701",
+                f"https://www.{self.domain}/LogonForm?langId=-1"
+                f"&storeId={self.config.costco_store_id}"
+                f"&catalogId={self.config.costco_catalog_id}",
                 wait_until="domcontentloaded",
             )
         except Exception:  # noqa: BLE001 — couldn't reach the logon flow; give up
@@ -1667,6 +1788,82 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
                 return
             except Exception:  # noqa: BLE001 — not shown / not clickable; skip
                 continue
+
+    # Cart-singleton guard tuning. The review-page grand total carries tax,
+    # shipping and fees on top of the item subtotal, so the band allows the
+    # subtotal (price × qty) to grow by ``_CART_TOTAL_BAND_MULT`` plus a flat
+    # ``_CART_TOTAL_MARGIN`` (covers a small order whose fixed shipping dwarfs a
+    # cheap item). A total above that band means the cart holds more than our
+    # line. Deliberately generous: a false abort is a safe needs_review, but a
+    # missed extra line is a wrong real order.
+    _CART_TOTAL_BAND_MULT = 1.30
+    _CART_TOTAL_MARGIN = 15.0
+
+    def _verify_cart_singleton(
+        self,
+        page: "Page",
+        item_key: str,
+        item: CatalogItem,
+        source: CostcoSource,
+        price: Optional[float],
+        review_total: Optional[float],
+    ) -> Optional[PurchaseResult]:
+        """Confirm the review page checks out only our item before Place Order.
+
+        Two signals: the number of line rows on the review page, and the order
+        total against an expected band. A positive mismatch (extra line, or a
+        total over band) aborts; a positive single-line read or an in-band total
+        verifies. When *neither* signal is readable the cart can't be verified,
+        so it fails closed (aborts) rather than risk checking out a stale line.
+        """
+        qty = item.qty
+        line_count = self._count_cart_lines(page)
+
+        # More lines than the single item we added → an extra line rides along.
+        if line_count is not None and line_count > 1:
+            return self._cart_mismatch(
+                page, item_key, f"{line_count} lines on the review page, expected 1"
+            )
+
+        # Order-total band — the reliable, live-verified signal.
+        total_ok = False
+        if price is not None and review_total is not None:
+            ceiling = price * qty * self._CART_TOTAL_BAND_MULT + self._CART_TOTAL_MARGIN
+            if review_total > ceiling:
+                return self._cart_mismatch(
+                    page,
+                    item_key,
+                    f"order total ${review_total:.2f} exceeds the ${ceiling:.2f} "
+                    f"band for {qty}×${price:.2f}",
+                )
+            total_ok = True
+
+        # Verified if the total is in band or we positively counted one line.
+        if total_ok or line_count == 1:
+            return None
+
+        # Couldn't read either signal → fail closed (operator decision).
+        return self._cart_mismatch(
+            page,
+            item_key,
+            "couldn't read the cart line count or order total to verify a single item",
+        )
+
+    def _count_cart_lines(self, page: "Page") -> Optional[int]:
+        """Count line rows on the review page, or None if no selector resolves.
+
+        Returns the match count of the first ``CART_LINE_SELECTORS`` candidate
+        that resolves to one or more rows; ``None`` when every guess misses (so
+        the guard relies on the total band / fails closed rather than reading an
+        absent selector as an empty cart)."""
+        for sel in self.CART_LINE_SELECTORS:
+            try:
+                count = page.locator(sel).count()
+            except Exception:  # noqa: BLE001 — try the next candidate
+                continue
+            if count > 0:
+                return count
+        return None
 
 
 class AmazonPurchaser(BasePurchaser[AmazonSource]):

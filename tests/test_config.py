@@ -16,6 +16,10 @@ def test_defaults_when_env_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.port == 8723
     assert cfg.costco_domain == "costco.com"
     assert cfg.amazon_domain == "amazon.com"
+    assert cfg.costco_store_id == "10301"
+    assert cfg.costco_catalog_id == "10701"
+    assert cfg.auto_retry is False
+    assert cfg.auto_retry_max == 1
     assert cfg.sheets_enabled is False
     assert cfg.notify_enabled is False
 
@@ -25,11 +29,19 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ROOMIEORDER_PORT", "9000")
     monkeypatch.setenv("ROOMIEORDER_DAILY_CAP", "50.5")
     monkeypatch.setenv("OPENCLAW_TARGET", "-100200300")
+    monkeypatch.setenv("ROOMIEORDER_COSTCO_STORE_ID", "847")
+    monkeypatch.setenv("ROOMIEORDER_COSTCO_CATALOG_ID", "11005")
+    monkeypatch.setenv("ROOMIEORDER_AUTO_RETRY", "true")
+    monkeypatch.setenv("ROOMIEORDER_AUTO_RETRY_MAX", "3")
     cfg = load_config()
     assert cfg.dry_run is False
     assert cfg.port == 9000
     assert cfg.daily_cap == 50.5
     assert cfg.notify_enabled is True
+    assert cfg.costco_store_id == "847"
+    assert cfg.costco_catalog_id == "11005"
+    assert cfg.auto_retry is True
+    assert cfg.auto_retry_max == 3
 
 
 def test_bad_number_raises(monkeypatch: pytest.MonkeyPatch) -> None:
