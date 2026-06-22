@@ -21,6 +21,9 @@ def test_defaults_when_env_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.auto_retry is False
     assert cfg.auto_retry_max == 1
     assert cfg.shots_retention_days == 30
+    assert cfg.heartbeat_url == ""
+    assert cfg.heartbeat_interval_seconds == 300
+    assert cfg.session_check_hours == 0.0
     assert cfg.sheets_enabled is False
     assert cfg.notify_enabled is False
 
@@ -35,6 +38,9 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ROOMIEORDER_AUTO_RETRY", "true")
     monkeypatch.setenv("ROOMIEORDER_AUTO_RETRY_MAX", "3")
     monkeypatch.setenv("ROOMIEORDER_SHOTS_RETENTION_DAYS", "7")
+    monkeypatch.setenv("ROOMIEORDER_HEARTBEAT_URL", "https://hc.example.com/ping/abc")
+    monkeypatch.setenv("ROOMIEORDER_HEARTBEAT_INTERVAL_SECONDS", "60")
+    monkeypatch.setenv("ROOMIEORDER_SESSION_CHECK_HOURS", "12")
     cfg = load_config()
     assert cfg.dry_run is False
     assert cfg.port == 9000
@@ -45,6 +51,9 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.auto_retry is True
     assert cfg.auto_retry_max == 3
     assert cfg.shots_retention_days == 7
+    assert cfg.heartbeat_url == "https://hc.example.com/ping/abc"
+    assert cfg.heartbeat_interval_seconds == 60
+    assert cfg.session_check_hours == 12.0
 
 
 def test_bad_number_raises(monkeypatch: pytest.MonkeyPatch) -> None:

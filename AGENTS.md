@@ -33,10 +33,11 @@ CI.
 `skipped_debounce` (guard declined); `price_blocked` / `spend_capped` (money
 guard); `unavailable` (sold out → triggers Amazon fallback, terminal on the
 last store); `failed`; `needs_review` (Place Order clicked but confirmation
-unread — **may have ordered, never auto-retried**); `challenge`.
+unread — **may have ordered, never auto-retried**); `challenge`; `blocked`
+(Akamai Access Denied / 403 — a fingerprint/IP ban, nothing to click).
 
-`failed` / `challenge` / `needs_review` / `spend_capped` **pause the worker**
-(`main.py:_PAUSE_STATUSES`); clear the cause, then `roomieorder resume`.
+`failed` / `challenge` / `blocked` / `needs_review` / `spend_capped` **pause the
+worker** (`main.py:_PAUSE_STATUSES`); clear the cause, then `roomieorder resume`.
 
 **Screenshot tags** (suffix on files in the shots dir, written on each failed
 step) tell you which stage died: `product` / `no_price` / `unavailable` /

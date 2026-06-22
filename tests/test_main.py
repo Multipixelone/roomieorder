@@ -341,6 +341,92 @@ def test_auto_retry_off_by_default_and_skips_non_retryable(config: Config) -> No
         on.store.close()
 
 
+def test_heartbeat_tick_pings_on_interval(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    from roomieorder.main import Engine
+
+    pings: list[str] = []
+    monkeypatch.setattr("roomieorder.main.heartbeat.ping", lambda url: pings.append(url) or True)
+    cfg = config.model_copy(
+        update={"heartbeat_url": "https://hc.example.com/ping/x", "heartbeat_interval_seconds": 300}
+    )
+    engine = Engine(cfg)
+    try:
+        engine._heartbeat_tick(now=1_000.0)  # first tick (last=0) → due
+        engine._heartbeat_tick(now=1_100.0)  # +100s, interval 300 → skip
+        engine._heartbeat_tick(now=1_400.0)  # +400s from first → due again
+        assert pings == ["https://hc.example.com/ping/x"] * 2
+    finally:
+        engine.store.close()
+
+
+def test_heartbeat_tick_noop_when_url_unset(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    from roomieorder.main import Engine
+
+    pings: list[str] = []
+    monkeypatch.setattr("roomieorder.main.heartbeat.ping", lambda url: pings.append(url) or True)
+    engine = Engine(config)  # heartbeat_url defaults to ""
+    try:
+        engine._heartbeat_tick(now=1_000.0)
+        assert pings == []
+    finally:
+        engine.store.close()
+
+
+class _RecordingNotifier:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def send(self, text: str, photo: object = None) -> bool:
+        self.sent.append(text)
+        return True
+
+
+def test_session_check_notifies_only_logged_out_provider(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from roomieorder.main import Engine
+
+    # The probe only runs for present profiles.
+    config.costco_profile_dir.mkdir(parents=True)
+    config.amazon_profile_dir.mkdir(parents=True)
+
+    class _FakePurchaser:
+        def __init__(self, logged_in: bool) -> None:
+            self._logged_in = logged_in
+
+        def verify_session(self) -> bool:
+            return self._logged_in
+
+    # costco logged out, amazon logged in.
+    monkeypatch.setattr(
+        "roomieorder.main.build_purchaser",
+        lambda cfg, provider: _FakePurchaser(provider == "amazon"),
+    )
+    engine = Engine(config.model_copy(update={"session_check_hours": 24.0}))
+    rec = _RecordingNotifier()
+    engine.notifier = rec  # type: ignore[assignment]
+    try:
+        engine._session_check_tick(now=1_000_000.0)
+        assert any("Costco session looks logged out" in s for s in rec.sent)
+        assert not any("Amazon" in s for s in rec.sent)
+    finally:
+        engine.store.close()
+
+
+def test_session_check_disabled_by_default(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    from roomieorder.main import Engine
+
+    def _boom(cfg: object, provider: str) -> object:
+        raise AssertionError("session probed while disabled")
+
+    monkeypatch.setattr("roomieorder.main.build_purchaser", _boom)
+    engine = Engine(config)  # session_check_hours defaults to 0.0
+    try:
+        engine._session_check_tick(now=1_000_000.0)  # returns before any probe
+    finally:
+        engine.store.close()
+
+
 def test_worker_pauses_on_challenge(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("roomieorder.main._WORKER_POLL_SECONDS", 0.02)
     monkeypatch.setattr("roomieorder.main.Orchestrator", FakeOrchestrator)

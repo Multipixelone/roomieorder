@@ -128,6 +128,20 @@ class Config(BaseModel):
     auto_retry: bool = False
     auto_retry_max: int = Field(default=1, ge=0)
 
+    # Dead-man's-switch heartbeat. The worker pings this URL on a timer; a missed
+    # ping alerts via whatever push-style monitor it points at — hosted
+    # Healthchecks.io or a self-hosted open-source instance, Uptime Kuma push,
+    # etc. Empty (default) disables it. The interval is the minimum gap between
+    # pings, not a guarantee — set the monitor's grace period above it.
+    heartbeat_url: str = ""
+    heartbeat_interval_seconds: int = Field(default=300, ge=1)
+
+    # Proactive session-freshness probe. Every N hours the worker relaunches each
+    # store profile read-only and notifies if it reloads logged out, so an expired
+    # session is caught before a real order hits the sign-in wall. 0 (default)
+    # disables it.
+    session_check_hours: float = Field(default=0.0, ge=0.0)
+
     @property
     def sheets_enabled(self) -> bool:
         return bool(self.sheet_id and self.google_service_account_json)
@@ -201,4 +215,7 @@ def load_config() -> Config:
         openclaw_channel=_env_str("OPENCLAW_CHANNEL", "telegram"),
         auto_retry=_env_bool("ROOMIEORDER_AUTO_RETRY", False),
         auto_retry_max=_env_int("ROOMIEORDER_AUTO_RETRY_MAX", 1),
+        heartbeat_url=_env_str("ROOMIEORDER_HEARTBEAT_URL", ""),
+        heartbeat_interval_seconds=_env_int("ROOMIEORDER_HEARTBEAT_INTERVAL_SECONDS", 300),
+        session_check_hours=_env_float("ROOMIEORDER_SESSION_CHECK_HOURS", 0.0),
     )

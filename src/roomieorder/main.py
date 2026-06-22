@@ -17,6 +17,7 @@ from __future__ import annotations
 import hmac
 import logging
 import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Optional
@@ -24,13 +25,14 @@ from typing import AsyncIterator, Optional
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
+from roomieorder import heartbeat
 from roomieorder.catalog import Catalog, CatalogError, CatalogItem, load_catalog
 from roomieorder.config import Config, load_config
 from roomieorder.guards import check_intake
 from roomieorder.logutil import correlated
 from roomieorder.notify import Notifier, build_notifier
 from roomieorder.orchestrator import Orchestrator
-from roomieorder.purchase import PurchaseResult
+from roomieorder.purchase import PurchaseResult, build_purchaser
 from roomieorder.retention import prune_shots
 from roomieorder.sheets import SheetsClient, build_sheets
 from roomieorder.store import QueueRow, Store
@@ -133,6 +135,12 @@ class Engine:
         # single-threaded and these are transient PDP-load failures, so a restart
         # resetting the count is harmless (recover_stale covers in-progress rows).
         self._transient_attempts: dict[str, int] = {}
+        # Monotonic timestamps of the last heartbeat ping / session-freshness
+        # probe, so the worker loop can fire each on its own interval without a
+        # dedicated timer thread. 0.0 = never fired (the first loop iteration
+        # triggers both, subject to their config being enabled).
+        self._last_heartbeat = 0.0
+        self._last_session_check = 0.0
         self._recover_orphans()
 
     def _recover_orphans(self) -> None:
@@ -174,6 +182,12 @@ class Engine:
         # disk even before the next order; each order re-prunes via _process.
         self._prune_shots()
         while not self._stop.is_set():
+            # Liveness/health ticks run before the pause/empty `continue`s below,
+            # so a paused-or-idle but *alive* loop still pings the heartbeat (that
+            # IS the signal a wedged worker can't send) and still probes session
+            # freshness on schedule.
+            self._heartbeat_tick()
+            self._session_check_tick()
             if self.store.is_paused():
                 self._stop.wait(_WORKER_POLL_SECONDS)
                 continue
@@ -198,6 +212,56 @@ class Engine:
             prune_shots(self.config.shots_dir, self.config.shots_retention_days)
         except Exception:  # noqa: BLE001 — disk hygiene must never crash the loop
             _logger.exception("shots prune failed")
+
+    def _heartbeat_tick(self, *, now: Optional[float] = None) -> None:
+        """Ping the heartbeat URL when one is configured and the interval elapsed.
+
+        No-op when ``heartbeat_url`` is empty. The ping itself is best-effort
+        (see :func:`heartbeat.ping`); the timestamp advances on every attempt so
+        a flapping monitor can't make the loop ping every iteration."""
+        if not self.config.heartbeat_url:
+            return
+        now = time.monotonic() if now is None else now
+        if now - self._last_heartbeat < self.config.heartbeat_interval_seconds:
+            return
+        self._last_heartbeat = now
+        heartbeat.ping(self.config.heartbeat_url)
+
+    def _session_check_tick(self, *, now: Optional[float] = None) -> None:
+        """Probe each store profile's login and notify if it reloads logged out.
+
+        No-op when ``session_check_hours`` is 0 (disabled). Runs on the worker
+        thread between claims, so it never overlaps a buy. Relaunches each present
+        profile read-only via the buy flow's ``verify_session``; a logged-out
+        result pings the operator *before* a real order hits the sign-in wall.
+        Per-provider best-effort, and the timestamp advances even on error so a
+        broken probe can't hammer the stores."""
+        hours = self.config.session_check_hours
+        if hours <= 0:
+            return
+        now = time.monotonic() if now is None else now
+        if now - self._last_session_check < hours * 3600.0:
+            return
+        self._last_session_check = now
+        profiles = {
+            "costco": self.config.costco_profile_dir,
+            "amazon": self.config.amazon_profile_dir,
+        }
+        for provider, profile_dir in profiles.items():
+            if not profile_dir.exists():
+                continue
+            try:
+                logged_in = build_purchaser(self.config, provider).verify_session()
+            except Exception:  # noqa: BLE001 — a probe failure must not crash the loop
+                _logger.exception("session probe failed for %s", provider)
+                continue
+            if not logged_in:
+                store_name = provider.capitalize()
+                self.notifier.send(
+                    f"⚠️ {store_name} session looks logged out — run "
+                    f"`roomieorder login --provider {provider}` before the next order"
+                )
+                _logger.warning("%s session probe: logged OUT", provider)
 
     # ─────────── per-row processing ───────────
 
