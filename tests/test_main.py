@@ -345,7 +345,12 @@ def test_heartbeat_tick_pings_on_interval(config: Config, monkeypatch: pytest.Mo
     from roomieorder.main import Engine
 
     pings: list[str] = []
-    monkeypatch.setattr("roomieorder.main.heartbeat.ping", lambda url: pings.append(url) or True)
+
+    def _record(url: str) -> bool:
+        pings.append(url)
+        return True
+
+    monkeypatch.setattr("roomieorder.main.heartbeat.ping", _record)
     cfg = config.model_copy(
         update={"heartbeat_url": "https://hc.example.com/ping/x", "heartbeat_interval_seconds": 300}
     )
@@ -363,7 +368,12 @@ def test_heartbeat_tick_noop_when_url_unset(config: Config, monkeypatch: pytest.
     from roomieorder.main import Engine
 
     pings: list[str] = []
-    monkeypatch.setattr("roomieorder.main.heartbeat.ping", lambda url: pings.append(url) or True)
+
+    def _record(url: str) -> bool:
+        pings.append(url)
+        return True
+
+    monkeypatch.setattr("roomieorder.main.heartbeat.ping", _record)
     engine = Engine(config)  # heartbeat_url defaults to ""
     try:
         engine._heartbeat_tick(now=1_000.0)
@@ -404,7 +414,7 @@ def test_session_check_notifies_only_logged_out_provider(
     )
     engine = Engine(config.model_copy(update={"session_check_hours": 24.0}))
     rec = _RecordingNotifier()
-    engine.notifier = rec  # type: ignore[assignment]
+    engine.notifier = rec
     try:
         engine._session_check_tick(now=1_000_000.0)
         assert any("Costco session looks logged out" in s for s in rec.sent)
