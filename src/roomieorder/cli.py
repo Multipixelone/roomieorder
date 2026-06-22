@@ -49,15 +49,9 @@ def _setup_logging(verbose: bool) -> None:
 
 def _purchaser_for(config: Config, provider: str) -> object:
     """Build the purchaser for ``provider`` with its own profile dir + domain."""
-    from roomieorder.purchase import AmazonPurchaser, CostcoPurchaser
+    from roomieorder.purchase import build_purchaser
 
-    if provider == "amazon":
-        return AmazonPurchaser(
-            config, profile_dir=config.amazon_profile_dir, domain=config.amazon_domain
-        )
-    return CostcoPurchaser(
-        config, profile_dir=config.costco_profile_dir, domain=config.costco_domain
-    )
+    return build_purchaser(config, provider)
 
 
 def _source_for(item: CatalogItem, provider: str) -> object:

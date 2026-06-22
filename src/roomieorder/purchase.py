@@ -41,7 +41,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Generic, Literal, Optional, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, Optional, TypeVar
 
 if TYPE_CHECKING:
     from playwright.sync_api import BrowserContext, Page
@@ -2104,3 +2104,19 @@ class AmazonPurchaser(BasePurchaser[AmazonSource]):
             return True
         except Exception:  # noqa: BLE001
             return False
+
+
+def build_purchaser(config: Config, provider: str) -> BasePurchaser[Any]:
+    """Build the purchaser for ``provider`` with its own profile dir + domain.
+
+    The single source of truth for pairing a store name with its
+    purchaser/profile/domain — reused by the CLI (``_purchaser_for``), the
+    orchestrator's fallback chain, and the worker's session-freshness probe, so
+    they can't drift. Defaults to Costco for any non-``amazon`` provider."""
+    if provider == "amazon":
+        return AmazonPurchaser(
+            config, profile_dir=config.amazon_profile_dir, domain=config.amazon_domain
+        )
+    return CostcoPurchaser(
+        config, profile_dir=config.costco_profile_dir, domain=config.costco_domain
+    )

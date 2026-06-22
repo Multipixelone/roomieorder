@@ -32,7 +32,7 @@ Intake is always-on; execution needs a live graphical session. Requests sit in t
 
 - [`serve`](./src/roomieorder/main.py) — start the FastAPI intake service + worker loop
 - [`init-db`](./src/roomieorder/store.py) — initialize the SQLite schema
-- [`catalog show`](./src/roomieorder/cli.py) — print all items in the catalog
+- [`catalog`](./src/roomieorder/cli.py) — print all items in the catalog
 - [`queue`](./src/roomieorder/cli.py) — show pending/recent queue rows
 - [`test-notify`](./src/roomieorder/notify.py) — emit a test message via the configured notifier
 - [`login --provider costco|amazon`](./src/roomieorder/cli.py) — open a store's profile to sign in by hand (one profile per store)
@@ -58,6 +58,11 @@ Intake is always-on; execution needs a live graphical session. Requests sit in t
 - **Daily spend cap** — global `$` ceiling per rolling 24 h; pauses worker and alerts on breach
 - **Challenge detection** — CAPTCHA / OTP pages halt the worker and ping you with a screenshot rather than looping
 
+### Health monitoring
+
+- **Heartbeat** — set `ROOMIEORDER_HEARTBEAT_URL` and the worker pings it on a timer (`ROOMIEORDER_HEARTBEAT_INTERVAL_SECONDS`, default 300). A wedged worker thread stops the pings and your monitor alerts — works with hosted [Healthchecks.io](https://healthchecks.io) or a self-hosted open-source instance, Uptime Kuma push, etc. Empty disables it.
+- **Session freshness** — set `ROOMIEORDER_SESSION_CHECK_HOURS` and the worker periodically relaunches each store profile read-only and notifies you if it's logged out, before a real order fails at the sign-in wall. `0` (default) disables it.
+
 ## Home Assistant integration
 
 Each staple item gets a button card on the HA dashboard that calls a `rest_command` pointing at `POST /reorder`:
@@ -81,9 +86,19 @@ script:
 
 Each order attempt appends a row: `timestamp | item_key | title | provider | product_id | qty | unit_price | order_total | order_id | status | requester | notes`
 
-`status` ∈ `placed | dry_run | skipped_cooldown | price_blocked | failed | challenge`.
+`status` ∈ `placed | dry_run | skipped_cooldown | skipped_debounce | price_blocked | spend_capped | unavailable | needs_review | failed | challenge | blocked`.
 
 Requires a Google Cloud service account JSON with editor access on the target sheet.
+
+## State, backup & restore
+
+All durable state lives under the configured paths (the systemd `StateDirectory` in the deployment):
+
+- **`ROOMIEORDER_DB`** (`data/state.sqlite`) — the queue, order history, spend accounting, and worker-pause flag. Back it up with the WAL checkpointed (`sqlite3 state.sqlite ".backup backup.sqlite"`).
+- **`ROOMIEORDER_PROFILE_DIR`** (`data/profile/{costco,amazon}`) — the per-store browser profiles holding the signed-in sessions. These are what `roomieorder login` populates; restoring them avoids re-logging-in. Keep them private (they contain live auth cookies).
+- **`ROOMIEORDER_SHOTS_DIR`** (`data/shots`) — screenshots / DOM dumps; safe to discard (auto-pruned, see `prune-shots`).
+
+To migrate to a new host, copy the DB and the profile dir; the catalog and env config come from your deployment.
 
 ## Development
 
