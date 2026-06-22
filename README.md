@@ -61,7 +61,7 @@ Intake is always-on; execution needs a live graphical session. Requests sit in t
 ### Health monitoring
 
 - **Heartbeat** — set `ROOMIEORDER_HEARTBEAT_URL` and the worker pings it on a timer (`ROOMIEORDER_HEARTBEAT_INTERVAL_SECONDS`, default 300). A wedged worker thread stops the pings and your monitor alerts — works with hosted [Healthchecks.io](https://healthchecks.io) or a self-hosted open-source instance, Uptime Kuma push, etc. Empty disables it.
-- **Session freshness** — set `ROOMIEORDER_SESSION_CHECK_HOURS` and the worker periodically relaunches each store profile read-only and notifies you if it's logged out, before a real order fails at the sign-in wall. `0` (default) disables it.
+- **Session freshness** — set `ROOMIEORDER_SESSION_CHECK_HOURS` and the worker periodically relaunches each store profile read-only and notifies you if it's logged out, before a real order fails at the sign-in wall. Default `3`; `0` disables it.
 
 ## Home Assistant integration
 

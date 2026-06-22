@@ -227,5 +227,5 @@ def load_config() -> Config:
         trace_orders=_env_bool("ROOMIEORDER_TRACE_ORDERS", False),
         heartbeat_url=_env_str("ROOMIEORDER_HEARTBEAT_URL", ""),
         heartbeat_interval_seconds=_env_int("ROOMIEORDER_HEARTBEAT_INTERVAL_SECONDS", 300),
-        session_check_hours=_env_float("ROOMIEORDER_SESSION_CHECK_HOURS", 0.0),
+        session_check_hours=_env_float("ROOMIEORDER_SESSION_CHECK_HOURS", 3.0),
     )

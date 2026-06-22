@@ -23,7 +23,7 @@ def test_defaults_when_env_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.shots_retention_days == 30
     assert cfg.heartbeat_url == ""
     assert cfg.heartbeat_interval_seconds == 300
-    assert cfg.session_check_hours == 0.0
+    assert cfg.session_check_hours == 3.0
     assert cfg.sheets_enabled is False
     assert cfg.notify_enabled is False
 
