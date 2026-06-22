@@ -1636,11 +1636,12 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
         "a[automation-id*='removeItem']",
     )
     # Primary button of Costco's generic confirm modal (reused site-wide; its
-    # markup sits hidden in the cart DOM until triggered). Cart removal looks to
-    # be a direct AJAX "Remove" with an undo toast — no confirm — but _reset_cart
-    # dismisses this if a remove ever does pop it, gated on visibility so the
-    # always-present hidden markup costs nothing. TODO(costco): confirm live
-    # whether remove pops a modal at all.
+    # markup sits hidden in the cart DOM until triggered). Verified live
+    # 2026-06-22 (trace-order, cart_view DOM): the `confirmationButton` markup is
+    # present (count=1) but stays hidden — cart removal is a direct AJAX "Remove"
+    # with an undo toast, no confirm dialog (consistent with the 2026-06-17 live
+    # run). So _reset_cart's `_confirm_if_visible` is belt-and-braces, gated on
+    # visibility, and the always-present hidden markup costs nothing.
     CART_CONFIRM_SELECTORS = ("[automation-id='confirmationButton']",)
     # Verified against live DOM 2026-06-17 — order-confirmation grand-total.
     ORDER_TOTAL_SELECTORS = (
@@ -1649,15 +1650,21 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
         ".grand-total .value",
     )
     # Per-line rows on the SinglePageCheckoutView review page — the cart-singleton
-    # guard counts these to confirm only our item is being checked out. The legacy
-    # WebSphere checkout renders order lines with automation-id/order-item markup;
-    # these are best guesses. TODO(costco): verify against live DOM via dump-dom.
-    # Unverified-and-absent is handled safely: the guard falls back to the
-    # (live-verified) order-total band and, failing that, fails closed.
+    # guard counts these to confirm only our item is being checked out. Verified
+    # live 2026-06-22 (trace-order disinfecting_wipes, review_pre_place DOM): on a
+    # one-line cart `.order-item` resolves to exactly 1 row, and the WebSphere
+    # checkout also stamps a 1-indexed `automation-id='itemNumberOutput_<n>'` per
+    # line (same convention as `removeItemLink_<n>`). The old `orderItemLine_` /
+    # `lineItem_` guesses are count=0 on this v2 view, so they're demoted to
+    # backstops. Order matters: `_count_cart_lines` returns the first candidate
+    # that resolves >0, so the live-verified selectors lead. Unverified-and-absent
+    # is still handled safely: the guard falls back to the (live-verified)
+    # order-total band and, failing that, fails closed.
     CART_LINE_SELECTORS = (
+        ".order-item",
+        "[automation-id^='itemNumberOutput_']",
         "[automation-id^='orderItemLine_']",
         "[automation-id^='lineItem_']",
-        ".order-item",
         ".line-item-detail",
     )
     # Legacy logon-form submit control. No longer used by the buy flow: Costco's

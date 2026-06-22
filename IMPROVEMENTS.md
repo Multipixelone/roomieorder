@@ -284,11 +284,25 @@ next line — fold into one.
   Costco PDP selectors were verified 2026-06-16/17 and the Costco *checkout* selectors
   live too — place-order (`#place-order-button-regular`), payment-method radio
   (`[automation-id='paymentReviewRadio']`), order-total (`[automation-id='orderTotalOutput']`),
-  cart-remove (`[automation-id^='removeItemLink_']`). **Still guesses:** the *confirmation*
-  scrape selectors (`ORDER_ID_RE`/`ORDER_ID_LABEL_RE`, post-order total) — reachable only
-  past a real Place Order, which has never run. This remains the project's central caveat
-  (see `PROGRESS.md` and project memory). Items #2, #3 above hardened the parts that can be
-  fixed *structurally*, independent of selector bring-up.
+  cart-remove (`[automation-id^='removeItemLink_']`). **Re-verified 2026-06-22** via
+  `trace-order` (dry-run, dumps DOM+probe+screenshot at all 8 checkpoints) across two
+  items (`disinfecting_wipes`, `cat_litter`) — the checkout selectors resolve and are
+  item-independent. That run also corrected the cart-singleton line selector:
+  `CART_LINE_SELECTORS` now leads with `.order-item` (count=1 on the v2 review page),
+  since the old `[automation-id^='orderItemLine_']`/`lineItem_` guesses are count=0 there.
+  **Still guesses:** the *confirmation* scrape selectors (`ORDER_ID_RE`/`ORDER_ID_LABEL_RE`,
+  post-order total) — reachable only past a real Place Order; `trace-order` halts at
+  `review_pre_place` by design, so it can't reach them (see `PROGRESS.md` and project
+  memory). Items #2, #3 above hardened the parts that can be fixed *structurally*,
+  independent of selector bring-up.
+- **Some catalog entries resolve to Grocery-by-Instacart products the buy flow can't
+  drive.** Found 2026-06-22: `trace-order paper_towels` failed at the PDP (`price=ok` but
+  `add-to-cart=MISS`) because the catalog item now resolves to a *Grocery by Instacart*
+  product whose PDP shows "Select Options" and has **no** `Button_addToCartDrawer_pdp` —
+  a different fulfilment flow the standard `ADD_TO_CART_SELECTORS` correctly don't match.
+  Fix at the catalog level: point such entries at a non-grocery Costco item number/url
+  (the real catalog lives in `nix-secrets/roomieorder/catalog.json`), or add an explicit
+  grocery/Select-Options path. Audit the other catalog items for the same fulfilment type.
 - **Worker pause is global, not per-item** — one challenge halts all ordering. This is
   intentional fail-safe design, noted only so it isn't "fixed" by accident.
 
