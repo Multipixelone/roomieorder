@@ -530,6 +530,7 @@ def doctor(check_login: bool) -> None:
     # ── config / safety ──
     line("ok", "dry_run", str(config.dry_run))
     line("ok", "daily_cap", f"${config.daily_cap:.2f}")
+    line("ok", "timeouts", f"step={config.step_timeout_ms}ms  landing={config.landing_timeout_ms}ms")
     line("ok", "intake", f"{config.host}:{config.port}  token={'set' if config.intake_token else 'none'}")
     line(
         "ok" if config.sheets_enabled else "warn",
@@ -558,12 +559,24 @@ def doctor(check_login: bool) -> None:
         line("warn", "chrome", "no path/channel — falls back to bundled Chromium (an Akamai tell)")
 
     # ── graphical session (the worker drives a headed browser) ──
-    display = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")
-    line(
-        "ok" if display else "warn",
-        "display",
-        display or "no DISPLAY/WAYLAND_DISPLAY — the worker can't run a headed browser here",
-    )
+    # Check the display that matches the configured mode: a Wayland-first box
+    # legitimately has no X11 DISPLAY, so the old "no DISPLAY" warn was a false
+    # alarm there. Cross-check ROOMIEORDER_WAYLAND against what's actually set.
+    wl = os.environ.get("WAYLAND_DISPLAY")
+    x11 = os.environ.get("DISPLAY")
+    if config.wayland:
+        if wl:
+            line("ok", "display", f"wayland {wl}")
+        else:
+            extra = f" (X11 DISPLAY={x11} present)" if x11 else ""
+            line("warn", "display", f"ROOMIEORDER_WAYLAND=true but WAYLAND_DISPLAY unset{extra}")
+    else:
+        if x11:
+            line("ok", "display", f"x11 {x11}")
+        elif wl:
+            line("warn", "display", f"WAYLAND_DISPLAY={wl} present but ROOMIEORDER_WAYLAND is false — set it?")
+        else:
+            line("warn", "display", "no DISPLAY/WAYLAND_DISPLAY — the worker can't run a headed browser here")
 
     # ── per-store profiles (login can't be confirmed offline — AGENTS.md §2) ──
     for label, path in (("costco", config.costco_profile_dir), ("amazon", config.amazon_profile_dir)):
@@ -602,6 +615,15 @@ def doctor(check_login: bool) -> None:
             f"paused={paused} {store.pause_reason()}" if paused else "running (not paused)",
         )
         line("ok", "queue", f"pending={store.pending_count()}  recent_trouble={trouble}")
+        # 24h spend vs the cap — the same window check_spend_cap guards on, so the
+        # operator sees how much headroom is left before the next order is capped.
+        spent = store.spend_since(24.0)
+        near_cap = config.daily_cap > 0 and spent >= 0.9 * config.daily_cap
+        line(
+            "warn" if near_cap else "ok",
+            "spend",
+            f"${spent:.2f} / ${config.daily_cap:.2f} (24h)" + ("  — near cap" if near_cap else ""),
+        )
         store.close()
     except Exception as exc:  # noqa: BLE001 — surface, don't crash the check
         hard_fail = True

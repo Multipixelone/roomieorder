@@ -86,10 +86,6 @@ def _playwright_api() -> object:
     raise ImportError("neither patchright nor playwright is installed")
 
 
-# Per-step navigation/click timeout. A step that stalls past this is a redesign
-# or a challenge, not slowness.
-_STEP_TIMEOUT_MS = 20_000
-
 # Exception types that mean "this is our bug", not "the store flaked". These
 # propagate out of `buy` instead of being laundered into a `failed` result, so a
 # code defect surfaces (and pauses the worker via the loop's handler) rather than
@@ -425,7 +421,8 @@ class BasePurchaser(Generic[SourceT]):
     # beat after _settle returns (e.g. Costco's CheckoutCartView → 302 redirect
     # chain plus late React hydration), so a single instantaneous read mistook an
     # arrived checkout for "no Place Order" (the no_buy_button false negative).
-    _LANDING_TIMEOUT_MS = 8_000
+    # The window itself is configurable (config.landing_timeout_ms); this is read
+    # via self.config at each use site.
 
     def __init__(self, config: Config, *, profile_dir: Path, domain: str) -> None:
         self.config = config
@@ -608,7 +605,7 @@ class BasePurchaser(Generic[SourceT]):
 
         with api.sync_playwright() as pw:  # type: ignore[attr-defined]
             context = self._launch_context(pw)
-            context.set_default_timeout(_STEP_TIMEOUT_MS)
+            context.set_default_timeout(self.config.step_timeout_ms)
             page = context.pages[0] if context.pages else context.new_page()
             # Mark this tab active so Chromium un-throttles its renderer even
             # when the OS window is occluded (see _launch_args). Belt-and-braces
@@ -691,6 +688,9 @@ class BasePurchaser(Generic[SourceT]):
                 self._wait_for_any(page, self.PRICE_SELECTORS)
                 price = self._read_price(page)
                 if price is None:
+                    # Surface *why* there's no price beyond the screenshot: which
+                    # page we were actually on when every PRICE_SELECTORS missed.
+                    log.warning("no price read for %s on %s", title, self._page_debug(page))
                     shot = self._screenshot(page, item_key, "no_price")
                     # Pre-cart and money-safe: a missed price often races a slow
                     # PDP hydration, so let the worker's opt-in auto-retry re-drive.
@@ -777,7 +777,9 @@ class BasePurchaser(Generic[SourceT]):
                 # The grand-total element hydrates after the checkout body, so a
                 # bare read can race it to None (seen live). Give it the same
                 # bounded window the landing check uses before reading.
-                self._wait_for_any(page, self.ORDER_TOTAL_SELECTORS, timeout=self._LANDING_TIMEOUT_MS)
+                self._wait_for_any(
+                    page, self.ORDER_TOTAL_SELECTORS, timeout=self.config.landing_timeout_ms
+                )
                 review_total = self._read_total(page)
                 # The review page is where the place-order/order-total/payment
                 # selector groups finally render — the surface dump-dom can't reach.
@@ -982,7 +984,7 @@ class BasePurchaser(Generic[SourceT]):
 
         with api.sync_playwright() as pw:  # type: ignore[attr-defined]
             context = self._launch_context(pw)
-            context.set_default_timeout(_STEP_TIMEOUT_MS)
+            context.set_default_timeout(self.config.step_timeout_ms)
             page = context.pages[0] if context.pages else context.new_page()
             try:
                 page.bring_to_front()
@@ -1162,6 +1164,9 @@ class BasePurchaser(Generic[SourceT]):
                 self._settle(page)
                 return self.ensure_logged_in(page)
             except Exception:  # noqa: BLE001 — couldn't reload; treat as unverified
+                correlated(_logger, provider=self.PROVIDER).debug(
+                    "session probe couldn't reload %s; reporting unverified", self.domain
+                )
                 return False
             finally:
                 context.close()
@@ -1248,7 +1253,7 @@ class BasePurchaser(Generic[SourceT]):
         name_re = re.compile(r"place (your )?order", re.I)
         btn = page.get_by_role("button", name=name_re)
         try:
-            btn.first.wait_for(state="visible", timeout=_STEP_TIMEOUT_MS)
+            btn.first.wait_for(state="visible", timeout=self.config.step_timeout_ms)
             btn.first.click(timeout=5_000)
             return True
         except Exception:  # noqa: BLE001 — fall through to the id/role fallbacks
@@ -1278,14 +1283,17 @@ class BasePurchaser(Generic[SourceT]):
         return f"{url} · {title}".strip(" ·")
 
     def _wait_for_any(
-        self, page: "Page", selectors: tuple[str, ...], timeout: int = _STEP_TIMEOUT_MS
+        self, page: "Page", selectors: tuple[str, ...], timeout: Optional[int] = None
     ) -> bool:
         """Block until any of ``selectors`` is visible, then return True.
 
         ``_click_first`` decides via an instantaneous ``count()`` snapshot, so a
         control that the store renders with JS *after* navigation reads as absent
         and the click is skipped. This gives that JS time to paint. Returns
-        False on timeout (the caller decides how to fail) rather than raising."""
+        False on timeout (the caller decides how to fail) rather than raising.
+        ``timeout`` defaults to the configured per-step ceiling."""
+        if timeout is None:
+            timeout = self.config.step_timeout_ms
         if not selectors:
             return False
         try:
@@ -1812,6 +1820,10 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
                 wait_until="domcontentloaded",
             )
         except Exception:  # noqa: BLE001 — couldn't reach the logon flow; give up
+            correlated(_logger, provider=self.PROVIDER).debug(
+                "silent re-auth couldn't reach %s logon flow; staying logged out",
+                self.domain,
+            )
             return False
         self._settle(page)
         return self.is_logged_in(page)
@@ -1883,7 +1895,9 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
         nothing."""
         if self._checkout_landed(page):
             return True
-        self._wait_for_any(page, self.PLACE_ORDER_SELECTORS, timeout=self._LANDING_TIMEOUT_MS)
+        self._wait_for_any(
+            page, self.PLACE_ORDER_SELECTORS, timeout=self.config.landing_timeout_ms
+        )
         return self._checkout_landed(page)
 
     def _select_payment_method(self, page: "Page") -> bool:
@@ -1932,6 +1946,11 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
                 wait_until="domcontentloaded",
             )
         except Exception:  # noqa: BLE001 — couldn't reach the cart; skip the reset
+            correlated(_logger, provider=self.PROVIDER).warning(
+                "cart reset skipped: couldn't reach %s/CheckoutCartView; a stale "
+                "line may trip the cart-singleton guard (cart_mismatch)",
+                self.domain,
+            )
             return
         self._settle(page)
         for _ in range(self._MAX_CART_LINES):

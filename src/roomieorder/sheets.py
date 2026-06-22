@@ -31,6 +31,10 @@ COLUMNS = [
     "status",
     "requester",
     "notes",
+    # The queue row id — the same token the worker logs as `[row=N …]` and that
+    # names the screenshot files. Lets you pivot from a Sheet line straight to
+    # its journal lines and shots without matching on timestamp.
+    "ref",
 ]
 
 # gspread needs the Sheets + Drive scopes to open a sheet by key and append.
@@ -53,6 +57,7 @@ class SheetRow(Protocol):
     status: str
     requester: str
     notes: str
+    ref: object
 
 
 def row_to_values(row: dict[str, object]) -> list[object]:

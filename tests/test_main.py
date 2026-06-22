@@ -278,6 +278,9 @@ def test_log_sheet_writes_owner_label(config: Config) -> None:
 
         assert captured[0]["status"] == "ordered for Finn"
         assert captured[0]["requester"] == "finn"
+        # The row id is carried into the sheet as `ref`, so a Sheet line pivots
+        # back to the worker's `row=` log lines and the screenshot files.
+        assert captured[0]["ref"] == 1
         # The internal status the queue/guards see is still the real "placed".
         assert result.status == "placed"
     finally:
