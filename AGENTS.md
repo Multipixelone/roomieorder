@@ -40,11 +40,16 @@ unread — **may have ordered, never auto-retried**); `challenge`.
 
 **Screenshot tags** (suffix on files in the shots dir, written on each failed
 step) tell you which stage died: `product` / `no_price` / `unavailable` /
-`guard_block` / `no_buy_button` / `no_place_order` / `signin_*` / `challenge_*`
-/ `submitted_unconfirmed` / `confirmation` / `review` / `timeout` / `crash` /
-`dump`. `verify-selectors` and `dump-dom` also write `*_dom.html` (rendered
-page) and `*_probe.txt` (per-selector match counts) — `Read` those to find the
-real selector instead of guessing.
+`guard_block` / `no_buy_button` / `no_place_order` / `cart_mismatch` (the
+cart-singleton guard saw more than the intended item — NOT placed) / `signin_*`
+/ `challenge_*` / `blocked_*` / `left_checkout` / `submitted_unconfirmed` /
+`confirmation` / `review` / `timeout` / `crash` / `dump`. Diagnostic tags are
+captured full-page (below-the-fold banners included); the `review`/`confirmation`
+/`dump` shots stay header-only. `verify-selectors` and `dump-dom` also write
+`*_dom.html` (rendered page) and `*_probe.txt` (per-selector match counts) —
+`Read` those to find the real selector instead of guessing. The shots dir is
+pruned automatically (worker) and via `roomieorder prune-shots`
+(`ROOMIEORDER_SHOTS_RETENTION_DAYS`, default 30).
 
 ## 1. Green CI does not mean the buy flow works
 

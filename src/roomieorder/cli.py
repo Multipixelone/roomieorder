@@ -12,7 +12,9 @@ Subcommands:
 * ``dry-run KEY`` — drive one item to its review page and screenshot, no order.
 * ``dump-dom KEY`` — read-only DOM dump + selector probe for bring-up.
 * ``verify-selectors`` — probe live pages for stale buy-flow selectors.
-* ``doctor``      — one-shot, read-only health check of every subsystem.
+* ``doctor``      — one-shot, read-only health check of every subsystem
+                    (``--check-login`` adds a per-store signed-in probe).
+* ``prune-shots`` — delete old screenshots/DOM dumps from the shots dir.
 * ``failures``    — list recent failed/blocked orders and their screenshots.
 * ``retry ID``    — re-enqueue a failed row for another attempt.
 * ``resume`` / ``pause`` / ``status`` — manage the worker-pause flag.
@@ -33,6 +35,7 @@ from roomieorder.catalog import CatalogItem, load_catalog
 from roomieorder.config import Config, load_config
 from roomieorder.guards import check_price_ceiling, check_spend_cap
 from roomieorder.notify import build_notifier
+from roomieorder.retention import prune_shots
 from roomieorder.sheets import build_sheets
 from roomieorder.store import Store
 
@@ -431,14 +434,25 @@ def verify_selectors(item_key: Optional[str], provider: str) -> None:
 
 
 @main.command()
-def doctor() -> None:
+@click.option(
+    "--check-login",
+    is_flag=True,
+    help="Also launch each store profile read-only and report whether it's still "
+    "signed in (needs a graphical session; slower).",
+)
+def doctor(check_login: bool) -> None:
     """Print a one-shot, read-only health check of every subsystem.
 
-    Never launches a browser or touches a store, so it's safe and instant.
-    Reports config/anti-bot, the graphical session the worker needs, the
-    per-store profiles, the DB/queue, and the catalog. Exits non-zero when a
-    hard check fails (a pinned Chrome that doesn't exist, an unopenable DB, an
+    By default never launches a browser or touches a store, so it's safe and
+    instant. Reports config/anti-bot, the graphical session the worker needs, the
+    per-store profiles, the DB/queue, and the catalog. Exits non-zero when a hard
+    check fails (a pinned Chrome that doesn't exist, an unopenable DB, an
     unparseable catalog), so it doubles as a smoke test.
+
+    ``--check-login`` adds a read-only session probe: it relaunches each store's
+    saved profile and reports LOGGED-IN / LOGGED-OUT (reusing the buy flow's
+    ``verify_session``) so an expired session is caught here instead of at the
+    next real order. It opens a browser and needs a graphical session.
     """
     config = load_config()
     hard_fail = False
@@ -488,9 +502,26 @@ def doctor() -> None:
     for label, path in (("costco", config.costco_profile_dir), ("amazon", config.amazon_profile_dir)):
         if path.exists():
             stamp = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
-            line("ok", f"profile/{label}", f"present, mtime {stamp} (login unverified — run dump-dom)")
+            present = "present" if check_login else "present (login unverified — run dump-dom)"
+            line("ok", f"profile/{label}", f"{present}, mtime {stamp}")
         else:
             line("warn", f"profile/{label}", f"missing {path} — run `roomieorder login --provider {label}`")
+            continue
+        if not check_login:
+            continue
+        # Read-only session probe: relaunch the saved profile and report whether
+        # it reloads signed in. Best-effort — a launch failure (no display, no
+        # Chrome) is a warn, not a hard fail, so the rest of doctor still reports.
+        try:
+            logged_in = _purchaser_for(config, label).verify_session()  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — surface, don't crash the check
+            line("warn", f"login/{label}", f"probe failed: {str(exc).splitlines()[0][:80]}")
+            continue
+        line(
+            "ok" if logged_in else "warn",
+            f"login/{label}",
+            "LOGGED-IN" if logged_in else f"LOGGED-OUT — run `roomieorder login --provider {label}`",
+        )
 
     # ── DB / queue ──
     try:
@@ -520,6 +551,32 @@ def doctor() -> None:
 
     if hard_fail:
         raise SystemExit(1)
+
+
+@main.command(name="prune-shots")
+@click.option(
+    "--days",
+    type=int,
+    default=None,
+    help="Delete shots older than this many days (default: ROOMIEORDER_SHOTS_RETENTION_DAYS).",
+)
+def prune_shots_cmd(days: Optional[int]) -> None:
+    """Delete old screenshots / DOM dumps from the shots dir.
+
+    The buy flow writes a PNG (and dump-dom an HTML + probe) on every attempt
+    with no rotation, so the shots dir grows unbounded. The worker prunes
+    automatically; this runs the same sweep by hand. ``--days`` overrides the
+    configured retention window; 0 (or an unset window) disables pruning.
+    """
+    config = load_config()
+    retention = days if days is not None else config.shots_retention_days
+    if retention <= 0:
+        click.echo(
+            "retention disabled — pass --days N or set ROOMIEORDER_SHOTS_RETENTION_DAYS > 0"
+        )
+        return
+    removed = prune_shots(config.shots_dir, retention)
+    click.echo(f"pruned {removed} file(s) older than {retention}d from {config.shots_dir}")
 
 
 @main.command()

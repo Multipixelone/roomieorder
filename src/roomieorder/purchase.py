@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 from roomieorder.catalog import AmazonSource, CatalogItem, CostcoSource
 from roomieorder.config import Config
 from roomieorder.guards import GuardResult
+from roomieorder.logutil import correlated
 from roomieorder.store import Status
 
 # Each purchaser drives exactly one store's source shape; bind it so the buy
@@ -103,6 +104,34 @@ _BUG_EXCEPTIONS = (
 _ClickRole = Literal["button", "link"]
 
 _JSONLD_SELECTOR = "script[type='application/ld+json']"
+
+# Diagnostic screenshot tags worth a full-page capture: the error banner / the
+# mismatched cart line / the disabled control you need for triage often sits
+# below the fold, which a header-only shot crops out. The happy-path `review`
+# and `confirmation` shots and the `dump` bring-up shot stay header-only — they
+# go out over the notifier, where a tall full-page PNG is just bulk. The
+# blocked_/challenge_/signin_ families carry a `_{where}` suffix, so they match
+# by prefix.
+_FULL_PAGE_TAGS = frozenset(
+    {
+        "no_price",
+        "no_buy_button",
+        "no_place_order",
+        "unavailable",
+        "guard_block",
+        "cart_mismatch",
+        "submitted_unconfirmed",
+        "left_checkout",
+        "timeout",
+        "crash",
+    }
+)
+_FULL_PAGE_TAG_PREFIXES = ("blocked_", "challenge_", "signin_")
+
+
+def _is_full_page_tag(tag: str) -> bool:
+    """True when a screenshot ``tag`` is a diagnostic worth capturing full-page."""
+    return tag in _FULL_PAGE_TAGS or tag.startswith(_FULL_PAGE_TAG_PREFIXES)
 
 # First number-ish run in a blob: digits with optional grouping/decimal
 # separators, e.g. "24.99", "1,234.56", "11,99".
@@ -459,6 +488,10 @@ class BasePurchaser(Generic[SourceT]):
 
         url = self._resolve_url(source)
         title = item.title
+        # Correlation token shared with the screenshot filenames
+        # ({ts}_{provider}_{item}_{tag}.png) and the worker/Sheet row, so one
+        # buy's log lines grep together.
+        log = correlated(_logger, provider=self.PROVIDER, item=item_key)
 
         with api.sync_playwright() as pw:  # type: ignore[attr-defined]
             context = self._launch_context(pw)
@@ -751,11 +784,11 @@ class BasePurchaser(Generic[SourceT]):
                 # A programmer error (bad attr/type/name, missing override, …).
                 # Screenshot for context, then re-raise so it can't hide as
                 # "store flakiness" — the worker loop records it and pauses.
-                _logger.exception("buy flow hit a programmer error for %s", item_key)
+                log.exception("buy flow hit a programmer error")
                 self._screenshot(page, item_key, "crash")
                 raise
             except Exception as exc:  # noqa: BLE001 — convert any flake to a safe result
-                _logger.exception("buy flow crashed for %s", item_key)
+                log.exception("buy flow crashed")
                 detail = f"buy flow error: {exc}".split("\n")[0]
                 if submitted:
                     return self._submitted_unconfirmed(
@@ -1406,8 +1439,9 @@ class BasePurchaser(Generic[SourceT]):
 
     def _screenshot(self, page: "Page", item_key: str, tag: str) -> Optional[Path]:
         path = self._shot_path(item_key, tag)
+        full_page = _is_full_page_tag(tag)
         try:
-            page.screenshot(path=str(path), full_page=False)
+            page.screenshot(path=str(path), full_page=full_page)
             return path
         except Exception as exc:  # noqa: BLE001
             _logger.warning("screenshot failed (%s): %s", tag, exc)

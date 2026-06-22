@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+import roomieorder.cli as cli
 from roomieorder.cli import _group_hits, _read_price_from_summary, main
 from roomieorder.store import Store
 
@@ -72,6 +73,36 @@ def test_doctor_fails_on_bad_catalog(env: Path, monkeypatch: pytest.MonkeyPatch)
     assert "FAIL" in result.output
 
 
+def test_doctor_check_login_probes_each_profile(env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The probe only runs for *present* profiles, so create both subdirs.
+    (env / "profile" / "costco").mkdir(parents=True)
+    (env / "profile" / "amazon").mkdir(parents=True)
+
+    class _FakePurchaser:
+        def __init__(self, logged_in: bool) -> None:
+            self._logged_in = logged_in
+
+        def verify_session(self) -> bool:
+            return self._logged_in
+
+    monkeypatch.setattr(cli, "_purchaser_for", lambda config, provider: _FakePurchaser(provider == "costco"))
+    result = CliRunner().invoke(main, ["doctor", "--check-login"])
+    assert result.exit_code == 0, result.output
+    assert "login/costco" in result.output and "LOGGED-IN" in result.output
+    assert "login/amazon" in result.output and "LOGGED-OUT" in result.output
+
+
+def test_doctor_default_never_probes_login(env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Without --check-login, doctor must not launch a browser/probe at all.
+    def _boom(config: object, provider: str) -> object:
+        raise AssertionError("doctor probed login without --check-login")
+
+    monkeypatch.setattr(cli, "_purchaser_for", _boom)
+    result = CliRunner().invoke(main, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "login/" not in result.output
+
+
 # ─────────── failures ───────────
 
 
@@ -119,6 +150,35 @@ def test_retry_unknown_row(env: Path) -> None:
     result = CliRunner().invoke(main, ["retry", "999"])
     assert result.exit_code != 0
     assert "no queue row #999" in result.output
+
+
+# ─────────── prune-shots ───────────
+
+
+def test_prune_shots_removes_old_files(env: Path) -> None:
+    import os
+    import time
+
+    shots = env / "shots"
+    shots.mkdir()
+    old = shots / "20260101T000000Z_costco_paper_towels_review.png"
+    old.write_bytes(b"x")
+    when = time.time() - 40 * 86_400
+    os.utime(old, (when, when))
+    fresh = shots / "fresh.png"
+    fresh.write_bytes(b"x")
+
+    result = CliRunner().invoke(main, ["prune-shots", "--days", "30"])
+    assert result.exit_code == 0, result.output
+    assert "pruned 1 file(s) older than 30d" in result.output
+    assert not old.exists()
+    assert fresh.exists()
+
+
+def test_prune_shots_disabled_with_zero(env: Path) -> None:
+    result = CliRunner().invoke(main, ["prune-shots", "--days", "0"])
+    assert result.exit_code == 0
+    assert "retention disabled" in result.output
 
 
 # ─────────── verify-selectors arg handling (no browser) ───────────

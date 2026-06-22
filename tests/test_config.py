@@ -20,6 +20,7 @@ def test_defaults_when_env_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.costco_catalog_id == "10701"
     assert cfg.auto_retry is False
     assert cfg.auto_retry_max == 1
+    assert cfg.shots_retention_days == 30
     assert cfg.sheets_enabled is False
     assert cfg.notify_enabled is False
 
@@ -33,6 +34,7 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ROOMIEORDER_COSTCO_CATALOG_ID", "11005")
     monkeypatch.setenv("ROOMIEORDER_AUTO_RETRY", "true")
     monkeypatch.setenv("ROOMIEORDER_AUTO_RETRY_MAX", "3")
+    monkeypatch.setenv("ROOMIEORDER_SHOTS_RETENTION_DAYS", "7")
     cfg = load_config()
     assert cfg.dry_run is False
     assert cfg.port == 9000
@@ -42,6 +44,7 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.costco_catalog_id == "11005"
     assert cfg.auto_retry is True
     assert cfg.auto_retry_max == 3
+    assert cfg.shots_retention_days == 7
 
 
 def test_bad_number_raises(monkeypatch: pytest.MonkeyPatch) -> None:
