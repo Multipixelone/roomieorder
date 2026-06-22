@@ -82,6 +82,11 @@ class Config(BaseModel):
     db_path: Path = Path("data/state.sqlite")
     profile_dir: Path = Path("data/profile")
     shots_dir: Path = Path("data/shots")
+    # Delete screenshots / DOM dumps older than this many days (the worker prunes
+    # at startup and after each order; `roomieorder prune-shots` runs it by hand).
+    # The shots dir is the systemd StateDirectory and grows unbounded otherwise.
+    # 0 disables pruning.
+    shots_retention_days: int = Field(default=30, ge=0)
 
     # Stores
     costco_domain: str = "costco.com"
@@ -180,6 +185,7 @@ def load_config() -> Config:
         db_path=Path(_env_str("ROOMIEORDER_DB", "data/state.sqlite")),
         profile_dir=Path(_env_str("ROOMIEORDER_PROFILE_DIR", "data/profile")),
         shots_dir=Path(_env_str("ROOMIEORDER_SHOTS_DIR", "data/shots")),
+        shots_retention_days=_env_int("ROOMIEORDER_SHOTS_RETENTION_DAYS", 30),
         costco_domain=_env_str("ROOMIEORDER_COSTCO_DOMAIN", "costco.com"),
         amazon_domain=_env_str("ROOMIEORDER_AMAZON_DOMAIN", "amazon.com"),
         costco_store_id=_env_str("ROOMIEORDER_COSTCO_STORE_ID", "10301"),

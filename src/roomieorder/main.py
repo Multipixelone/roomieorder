@@ -27,9 +27,11 @@ from pydantic import BaseModel
 from roomieorder.catalog import Catalog, CatalogError, CatalogItem, load_catalog
 from roomieorder.config import Config, load_config
 from roomieorder.guards import check_intake
+from roomieorder.logutil import correlated
 from roomieorder.notify import Notifier, build_notifier
 from roomieorder.orchestrator import Orchestrator
 from roomieorder.purchase import PurchaseResult
+from roomieorder.retention import prune_shots
 from roomieorder.sheets import SheetsClient, build_sheets
 from roomieorder.store import QueueRow, Store
 
@@ -168,6 +170,9 @@ class Engine:
             self._thread.join(timeout=10.0)
 
     def _worker_loop(self) -> None:
+        # Sweep stale shots once at startup so a long-idle service still reclaims
+        # disk even before the next order; each order re-prunes via _process.
+        self._prune_shots()
         while not self._stop.is_set():
             if self.store.is_paused():
                 self._stop.wait(_WORKER_POLL_SECONDS)
@@ -179,13 +184,25 @@ class Engine:
             try:
                 self._process(row)
             except Exception:  # noqa: BLE001 — a crash must not kill the loop
-                _logger.exception("worker failed processing row %d", row.id)
+                correlated(_logger, row=row.id, item=row.item_key).exception(
+                    "worker failed processing row"
+                )
                 self.store.mark(row.id, "failed", notes="worker crashed")
                 self.store.set_paused(True, f"worker crashed on row {row.id}")
+            finally:
+                self._prune_shots()
+
+    def _prune_shots(self) -> None:
+        """Best-effort shots retention sweep — never disrupts the worker loop."""
+        try:
+            prune_shots(self.config.shots_dir, self.config.shots_retention_days)
+        except Exception:  # noqa: BLE001 — disk hygiene must never crash the loop
+            _logger.exception("shots prune failed")
 
     # ─────────── per-row processing ───────────
 
     def _process(self, row: QueueRow) -> None:
+        log = correlated(_logger, row=row.id, item=row.item_key)
         item = self.catalog.get(row.item_key)
         if item is None:
             self.store.mark(row.id, "failed", notes="item_key not in catalog")
@@ -215,7 +232,7 @@ class Engine:
 
         if result.status in _PAUSE_STATUSES:
             self.store.set_paused(True, result.message)
-            _logger.warning("worker paused: %s", result.message)
+            log.warning("worker paused: %s", result.message)
         elif result.status == "placed":
             self._enforce_recorded_cap()
 
@@ -236,9 +253,8 @@ class Engine:
             return False
         self._transient_attempts[row.item_key] = count + 1
         new_id = self.store.enqueue(row.item_key, row.requester)
-        _logger.info(
-            "auto-retry %s: transient pre-cart failure (%d/%d) — re-enqueued as #%d",
-            row.item_key,
+        correlated(_logger, row=row.id, item=row.item_key).info(
+            "auto-retry: transient pre-cart failure (%d/%d) — re-enqueued as #%d",
             count + 1,
             self.config.auto_retry_max,
             new_id,

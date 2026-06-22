@@ -12,6 +12,7 @@ from roomieorder.purchase import (
     _JSONLD_SELECTOR,
     AmazonPurchaser,
     CostcoPurchaser,
+    _is_full_page_tag,
     _price_from_jsonld,
     looks_like,
     parse_price,
@@ -756,6 +757,52 @@ def test_cart_guard_band_scales_with_qty(config: Config) -> None:
         _ReviewPage(lines=1), "dish_soap", item, source, 11.99, 80.00
     )
     assert over is not None and over.status == "needs_review"
+
+
+# ─────────── full-page diagnostic screenshots ───────────
+
+
+@pytest.mark.parametrize(
+    "tag,full",
+    [
+        ("no_price", True),
+        ("cart_mismatch", True),
+        ("no_place_order", True),
+        ("timeout", True),
+        ("crash", True),
+        # The blocked_/challenge_/signin_ families carry a _{where} suffix.
+        ("blocked_checkout", True),
+        ("challenge_product", True),
+        ("signin_confirm", True),
+        # Happy-path / bring-up shots stay header-only.
+        ("review", False),
+        ("confirmation", False),
+        ("dump", False),
+    ],
+)
+def test_is_full_page_tag(tag: str, full: bool) -> None:
+    assert _is_full_page_tag(tag) is full
+
+
+class _ShotPage:
+    """Records the full_page flag a screenshot was taken with."""
+
+    def __init__(self) -> None:
+        self.full_page: bool | None = None
+
+    def screenshot(self, path: str | None = None, full_page: bool = False) -> None:
+        self.full_page = full_page
+
+
+def test_screenshot_uses_full_page_for_diagnostics(config: Config) -> None:
+    purchaser = _purchaser(config)
+    diag = _ShotPage()
+    purchaser._screenshot(diag, "paper_towels", "cart_mismatch")
+    assert diag.full_page is True
+
+    happy = _ShotPage()
+    purchaser._screenshot(happy, "paper_towels", "review")
+    assert happy.full_page is False
 
 
 def test_cart_guard_base_hook_is_noop_for_amazon(config: Config) -> None:
