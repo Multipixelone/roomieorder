@@ -885,7 +885,7 @@ class _RecordingPurchaser:
 
 def test_null_tracer_checkpoint_is_noop() -> None:
     # The default tracer on a live buy must do nothing and never raise.
-    assert _NULL_TRACER.checkpoint(_FakePage(), "product_loaded") is None
+    _NULL_TRACER.checkpoint(_FakePage(), "product_loaded")
 
 
 def test_new_run_id_is_trace_prefixed() -> None:
@@ -897,7 +897,7 @@ def test_new_run_id_is_trace_prefixed() -> None:
 
 def test_flow_tracer_captures_each_checkpoint() -> None:
     p = _RecordingPurchaser()
-    tracer = FlowTracer(p, "paper_towels", run_id="trace120000")  # type: ignore[arg-type]
+    tracer = FlowTracer(p, "paper_towels", run_id="trace120000")
     page = _FakePage(url="https://www.costco.com/checkout")
 
     tracer.checkpoint(page, "product_loaded")
@@ -917,7 +917,7 @@ def test_flow_tracer_survives_probe_failure() -> None:
     # A probe error at one checkpoint must not abort the buy — it's recorded and
     # the DOM/screenshot are still written.
     p = _RecordingPurchaser(probe_raises=True)
-    tracer = FlowTracer(p, "paper_towels", run_id="trace1")  # type: ignore[arg-type]
+    tracer = FlowTracer(p, "paper_towels", run_id="trace1")
     tracer.checkpoint(_FakePage(), "checkout_landed")
     assert len(tracer.steps) == 1
     assert "probe failed" in tracer.steps[0].summary
@@ -930,7 +930,7 @@ def test_amazon_start_checkout_threads_tracer(config: Config) -> None:
     page = _FakePage()
     page.present = {AmazonPurchaser.BUY_NOW_SELECTORS[0]}
     rec = _RecordingTracer()
-    assert _amazon(config)._start_checkout(page, tracer=rec) is True  # type: ignore[arg-type]
+    assert _amazon(config)._start_checkout(page, tracer=rec) is True
     assert rec.names == ["buy_now"]
 
 
