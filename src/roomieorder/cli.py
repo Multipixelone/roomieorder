@@ -11,6 +11,7 @@ Subcommands:
 * ``login``        — open the profile headed to sign into Costco by hand.
 * ``dry-run KEY`` — drive one item to its review page and screenshot, no order.
 * ``dump-dom KEY`` — read-only DOM dump + selector probe for bring-up.
+* ``trace-order KEY`` — DRY_RUN walk dumping DOM + probe + screenshot per step.
 * ``verify-selectors`` — probe live pages for stale buy-flow selectors.
 * ``doctor``      — one-shot, read-only health check of every subsystem
                     (``--check-login`` adds a per-store signed-in probe).
@@ -302,6 +303,78 @@ def dump_dom(item_key: str, provider: str) -> None:
     click.echo(f"screenshot: {result.screenshot}")
     click.echo("")
     click.echo(result.summary)
+
+
+# Selector groups worth a one-line PASS/MISS digest per checkpoint in the
+# trace-order table — the buy-flow groups, skipping the noisier price-meta/signin.
+_DIGEST_GROUPS = ("price", "add-to-cart", "buy-now", "place-order", "order-total")
+
+
+@main.command(name="trace-order")
+@click.argument("item_key")
+@_PROVIDER_OPT
+def trace_order(item_key: str, provider: str) -> None:
+    """Walk ITEM_KEY through the whole buy flow, dumping every step — never orders.
+
+    Forces DRY_RUN (like ``dry-run``) so it always halts at the review page
+    *before* Place Order, then attaches a tracer that writes a rendered DOM, a
+    selector probe, and a screenshot at each checkpoint — product page, cart,
+    cart view, delivery, payment, and the review page. Unlike ``dump-dom`` (which
+    stops at the product page), this reaches the checkout/review surface where the
+    ``place-order``/``order-total``/payment selectors finally render, so they
+    become discoverable. Hits live store pages, so it's operator-run, not CI.
+    """
+    from roomieorder.purchase import FlowTracer, new_run_id
+
+    config = load_config()
+    config = config.model_copy(update={"dry_run": True})
+    items = load_catalog(config.catalog_path)
+    item = items.get(item_key)
+    if item is None:
+        raise click.ClickException(f"unknown item_key: {item_key} (have: {', '.join(items)})")
+    source = _source_for(item, provider)
+
+    store = Store(config.db_path)
+    store.init_db()
+    purchaser = _purchaser_for(config, provider)
+
+    def proceed_check(live_price: float):  # type: ignore[no-untyped-def]
+        ceiling = check_price_ceiling(item.title, source.price_ceiling, live_price)  # type: ignore[attr-defined]
+        if not ceiling.ok:
+            return ceiling
+        return check_spend_cap(store, config, live_price * item.qty)
+
+    tracer = FlowTracer(purchaser, item_key, run_id=new_run_id())  # type: ignore[arg-type]
+    click.echo(f"trace-order {item_key} ({provider}) → {purchaser._resolve_url(source)}")  # type: ignore[attr-defined]
+    result = purchaser.buy(item_key, item, source, proceed_check, tracer=tracer)  # type: ignore[attr-defined]
+    store.close()
+
+    click.echo(f"status:      {result.status}")
+    click.echo(f"unit_price:  {result.unit_price}")
+    click.echo(f"order_total: {result.order_total}")
+    click.echo(f"message:     {result.message}")
+    click.echo("")
+    click.echo(f"steps ({len(tracer.steps)}):")
+    any_artifact = False
+    for step in tracer.steps:
+        hits = _group_hits(step.summary)
+        digest = " ".join(
+            f"{g}={'ok' if hits.get(g) else 'MISS'}"
+            for g in _DIGEST_GROUPS
+            if g in hits
+        )
+        click.echo(f"  {step.idx:02d} {step.name:18} {step.url}")
+        click.echo(f"     {digest}")
+        if step.probe:
+            any_artifact = True
+            click.echo(f"     probe: {step.probe}")
+        if step.html:
+            click.echo(f"     dom:   {step.html}")
+        if step.screenshot:
+            click.echo(f"     shot:  {step.screenshot}")
+    if any_artifact:
+        click.echo("")
+        click.echo("For any group still MISS at a checkout step, Read that step's *_dom.html to find the live selector.")
 
 
 # Statuses that mean an order didn't cleanly place — what `failures` surfaces.

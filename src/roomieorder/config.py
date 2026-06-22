@@ -128,6 +128,15 @@ class Config(BaseModel):
     auto_retry: bool = False
     auto_retry_max: int = Field(default=1, ge=0)
 
+    # Opt-in full-flow tracing on *live* worker orders (off by default). When on,
+    # every buy attaches a purchase.FlowTracer that dumps a DOM + selector probe +
+    # screenshot at each checkout step into shots_dir — the same artifacts the
+    # `trace-order` CLI produces, but for real runs, so a mid-checkout failure
+    # leaves the whole trail. Adds page.content()+screenshot I/O per step, so it's
+    # an advanced troubleshooting escape hatch, not a default. The pruner covers
+    # the extra artifacts via shots_retention_days.
+    trace_orders: bool = False
+
     # Dead-man's-switch heartbeat. The worker pings this URL on a timer; a missed
     # ping alerts via whatever push-style monitor it points at — hosted
     # Healthchecks.io or a self-hosted open-source instance, Uptime Kuma push,
@@ -215,6 +224,7 @@ def load_config() -> Config:
         openclaw_channel=_env_str("OPENCLAW_CHANNEL", "telegram"),
         auto_retry=_env_bool("ROOMIEORDER_AUTO_RETRY", False),
         auto_retry_max=_env_int("ROOMIEORDER_AUTO_RETRY_MAX", 1),
+        trace_orders=_env_bool("ROOMIEORDER_TRACE_ORDERS", False),
         heartbeat_url=_env_str("ROOMIEORDER_HEARTBEAT_URL", ""),
         heartbeat_interval_seconds=_env_int("ROOMIEORDER_HEARTBEAT_INTERVAL_SECONDS", 300),
         session_check_hours=_env_float("ROOMIEORDER_SESSION_CHECK_HOURS", 0.0),
