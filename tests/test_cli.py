@@ -64,6 +64,9 @@ def test_doctor_runs_clean(env: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "catalog        2 items" in result.output
     assert "dry_run" in result.output
+    # New diagnostics: effective buy-flow timeouts and 24h spend vs the cap.
+    assert "timeouts" in result.output and "step=20000ms" in result.output
+    assert "spend" in result.output
 
 
 def test_doctor_fails_on_bad_catalog(env: Path, monkeypatch: pytest.MonkeyPatch) -> None:

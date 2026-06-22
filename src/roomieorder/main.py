@@ -405,6 +405,7 @@ class Engine:
                 "status": _sheet_status(item, result.status),
                 "requester": row.requester,
                 "notes": result.message,
+                "ref": row.id,
             }
         )
 

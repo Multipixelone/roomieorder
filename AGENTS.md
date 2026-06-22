@@ -58,6 +58,19 @@ find the real selector instead of guessing. The shots dir is
 pruned automatically (worker) and via `roomieorder prune-shots`
 (`ROOMIEORDER_SHOTS_RETENTION_DAYS`, default 30).
 
+**Correlating a Sheet row back to the logs.** Every Sheets row carries a `ref`
+column = the queue row id. That id is also the `row=` token in the worker's log
+lines and prefixes the journal output, so to investigate "why did this Sheet line
+fail?" grep the journal for `row=<ref>` (and the shots for the same item) instead
+of matching on timestamp.
+
+**Timeouts trip on slowness, not just redesigns.** The per-step ceiling and the
+checkout-landing window are configurable: `ROOMIEORDER_STEP_TIMEOUT_MS` (default
+20000) and `ROOMIEORDER_LANDING_TIMEOUT_MS` (default 8000). If a store
+legitimately slows checkout and a step times out on a page that's clearly correct
+(the screenshot shows the right surface), raise these rather than chasing a
+selector. `roomieorder doctor` prints the effective values.
+
 ## 1. Green CI does not mean the buy flow works
 
 `nix flake check` / pytest passing only proves the pure helpers are correct

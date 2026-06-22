@@ -24,6 +24,8 @@ def test_defaults_when_env_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.heartbeat_url == ""
     assert cfg.heartbeat_interval_seconds == 300
     assert cfg.session_check_hours == 3.0
+    assert cfg.step_timeout_ms == 20_000
+    assert cfg.landing_timeout_ms == 8_000
     assert cfg.sheets_enabled is False
     assert cfg.notify_enabled is False
 
@@ -41,6 +43,8 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ROOMIEORDER_HEARTBEAT_URL", "https://hc.example.com/ping/abc")
     monkeypatch.setenv("ROOMIEORDER_HEARTBEAT_INTERVAL_SECONDS", "60")
     monkeypatch.setenv("ROOMIEORDER_SESSION_CHECK_HOURS", "12")
+    monkeypatch.setenv("ROOMIEORDER_STEP_TIMEOUT_MS", "30000")
+    monkeypatch.setenv("ROOMIEORDER_LANDING_TIMEOUT_MS", "5000")
     cfg = load_config()
     assert cfg.dry_run is False
     assert cfg.port == 9000
@@ -54,6 +58,8 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.heartbeat_url == "https://hc.example.com/ping/abc"
     assert cfg.heartbeat_interval_seconds == 60
     assert cfg.session_check_hours == 12.0
+    assert cfg.step_timeout_ms == 30_000
+    assert cfg.landing_timeout_ms == 5_000
 
 
 def test_bad_number_raises(monkeypatch: pytest.MonkeyPatch) -> None:

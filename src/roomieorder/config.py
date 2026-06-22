@@ -99,6 +99,16 @@ class Config(BaseModel):
     costco_catalog_id: str = "10701"
     wayland: bool = False
 
+    # Buy-flow timeouts (milliseconds). `step_timeout_ms` is the per-step
+    # navigation/click ceiling — a step that stalls past it is a redesign or a
+    # challenge, not slowness. `landing_timeout_ms` is the shorter window the
+    # checkout/total selectors get to hydrate after the page lands (they paint
+    # after the body, so a bare read races them to None). Both default to the
+    # values verified live; raise them if a store slows checkout so a redesign
+    # doesn't masquerade as a timeout, without a code edit + redeploy.
+    step_timeout_ms: int = Field(default=20_000, ge=1_000)
+    landing_timeout_ms: int = Field(default=8_000, ge=1_000)
+
     # Browser / anti-bot. Akamai fingerprints the *real* browser build, so the
     # buy flow must drive Google Chrome, not Playwright's bundled Chromium —
     # Chromium ships no proprietary H.264/AAC codecs and brands its Sec-CH-UA as
@@ -147,9 +157,9 @@ class Config(BaseModel):
 
     # Proactive session-freshness probe. Every N hours the worker relaunches each
     # store profile read-only and notifies if it reloads logged out, so an expired
-    # session is caught before a real order hits the sign-in wall. 0 (default)
-    # disables it.
-    session_check_hours: float = Field(default=0.0, ge=0.0)
+    # session is caught before a real order hits the sign-in wall. Defaults to 3h;
+    # 0 disables it.
+    session_check_hours: float = Field(default=3.0, ge=0.0)
 
     @property
     def sheets_enabled(self) -> bool:
@@ -214,6 +224,8 @@ def load_config() -> Config:
         costco_store_id=_env_str("ROOMIEORDER_COSTCO_STORE_ID", "10301"),
         costco_catalog_id=_env_str("ROOMIEORDER_COSTCO_CATALOG_ID", "10701"),
         wayland=_env_bool("ROOMIEORDER_WAYLAND", False),
+        step_timeout_ms=_env_int("ROOMIEORDER_STEP_TIMEOUT_MS", 20_000),
+        landing_timeout_ms=_env_int("ROOMIEORDER_LANDING_TIMEOUT_MS", 8_000),
         chrome_path=_env_str("ROOMIEORDER_CHROME_PATH", ""),
         chrome_channel=_env_str("ROOMIEORDER_CHROME_CHANNEL", "chrome"),
         google_service_account_json=_env_str("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
