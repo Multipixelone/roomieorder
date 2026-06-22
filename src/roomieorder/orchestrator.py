@@ -23,8 +23,10 @@ from roomieorder.purchase import (
     AmazonPurchaser,
     BasePurchaser,
     CostcoPurchaser,
+    FlowTracer,
     ProceedCheck,
     PurchaseResult,
+    new_run_id,
 )
 from roomieorder.store import Store
 
@@ -104,7 +106,19 @@ class Orchestrator:
 
         for idx, (name, source, purchaser) in enumerate(chain):
             is_last = idx == len(chain) - 1
-            result = purchaser.buy(item_key, item, source, self._proceed_check(item, source))
+            # Opt-in full-flow trace on live orders (config.trace_orders, default
+            # off). Each store-leg gets its own run_id so a Costco→Amazon fallback
+            # keeps its two traces apart. Off → the no-op default keeps the buy
+            # byte-for-byte unchanged.
+            tracer = (
+                FlowTracer(purchaser, item_key, run_id=new_run_id())
+                if self.config.trace_orders
+                else None
+            )
+            kwargs = {"tracer": tracer} if tracer is not None else {}
+            result = purchaser.buy(
+                item_key, item, source, self._proceed_check(item, source), **kwargs
+            )
             result.provider = name
 
             if result.status in _FALLBACK_STATUSES and not is_last:

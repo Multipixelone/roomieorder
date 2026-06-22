@@ -9,13 +9,14 @@ before touching the buy flow, the catalog, or login/bot-detection logic.
 Start every "why did X break" investigation with the read-only diagnostics
 below — they're safe (no browser, no spend) and tell you where to look. The
 `.claude/commands/` slash commands (`/diagnose`, `/triage-failure`,
-`/verify-selectors`, `/bring-up`) chain these for you.
+`/verify-selectors`, `/trace-order`, `/bring-up`) chain these for you.
 
 | Symptom | First command | Then read |
 | --- | --- | --- |
 | "is anything wrong?" / cold start | `roomieorder doctor` | its own output (config, Chrome, display, profiles, DB, catalog) |
 | "the order didn't place" | `roomieorder failures` | the newest `*.png` it lists, plus the row's `notes` |
 | selector miss / store redesign | `roomieorder verify-selectors [item]` | the `*_dom.html` it points at, then read the live selector off it (§1) |
+| checkout/review selector miss (`no_place_order` / `left_checkout` / `cart_mismatch`) | `roomieorder trace-order <item>` (DRY_RUN walk, never orders) | the `*_checkout_landed_dom.html` it dumps — the only place `place-order`/`order-total`/payment selectors render (§1) |
 | logged out / sign-in wall | `roomieorder dump-dom <item>` | §2 — prefilled ≠ logged in; check the **logon URL**, not header text |
 | CAPTCHA / OTP challenge | (worker auto-pauses) `roomieorder status` | §1, §3 — Akamai may be blocking; this is expected-until-verified |
 | Sheets row never appeared | `roomieorder test-sheet` | the gspread error (`-v`); a no-op logger silently "succeeds" otherwise |
@@ -26,7 +27,10 @@ below — they're safe (no browser, no spend) and tell you where to look. The
 are read-only and allow-listed in `.claude/settings.json`, so they run without a
 permission prompt. `verify-selectors` (and `dump-dom`) hit live store pages
 read-only and need a logged-in profile + network — they're operator-run, not
-CI.
+CI. `trace-order` is the same footprint but walks the *whole* flow to the review
+page (always DRY_RUN — never orders); add
+`Bash(roomieorder trace-order:*)` to the settings allow-list to run it without a
+prompt.
 
 **Queue statuses** (`store.py`, also the Sheets `status` column): `pending` /
 `in_progress` (transient); `placed` (done); `dry_run`; `skipped_cooldown` /
@@ -46,9 +50,11 @@ cart-singleton guard saw more than the intended item — NOT placed) / `signin_*
 / `challenge_*` / `blocked_*` / `left_checkout` / `submitted_unconfirmed` /
 `confirmation` / `review` / `timeout` / `crash` / `dump`. Diagnostic tags are
 captured full-page (below-the-fold banners included); the `review`/`confirmation`
-/`dump` shots stay header-only. `verify-selectors` and `dump-dom` also write
-`*_dom.html` (rendered page) and `*_probe.txt` (per-selector match counts) —
-`Read` those to find the real selector instead of guessing. The shots dir is
+/`dump` shots stay header-only. `trace-order` adds a per-step family tagged
+`trace{HHMMSS}_{NN}_{step}` (full-page, so the whole cart/review page is caught).
+`verify-selectors`, `dump-dom`, and `trace-order` also write `*_dom.html`
+(rendered page) and `*_probe.txt` (per-selector match counts) — `Read` those to
+find the real selector instead of guessing. The shots dir is
 pruned automatically (worker) and via `roomieorder prune-shots`
 (`ROOMIEORDER_SHOTS_RETENTION_DAYS`, default 30).
 
@@ -94,6 +100,19 @@ can be verified without a session; cart/checkout/place-order selectors need a
 logged-in profile. (`_PRICE_SELECTORS` already has a structured-data fallback —
 `og:price`/`product:price:amount` meta tags, then JSON-LD `offers.price` — for
 when the visible-price CSS guesses miss on the `/p/-/<slug>/<id>` storefront.)
+
+**Reaching the cart/checkout selectors — `roomieorder trace-order <item>`.**
+`dump-dom` stops at the product page, so the `place-order`/`order-total`/payment
+selector groups always read `count=0` there. `trace-order` (also DRY_RUN, never
+orders — it forces `dry_run` and halts at the review page) attaches a
+`purchase.FlowTracer` that drops the same DOM + probe + screenshot trio at every
+checkpoint of the *real* buy path (`product_loaded` → `cart_added` → `cart_view`
+→ `delivery_continue` → `payment_selected` → `checkout_landed` →
+`review_pre_place`). To fix a checkout selector miss, run it and `Read` the
+`*_checkout_landed_dom.html` — that's the SinglePageCheckoutView where those
+selectors live. The same tracer rides live worker orders when
+`ROOMIEORDER_TRACE_ORDERS=true` (default off — adds per-step I/O; an advanced
+escape hatch for a recurring mid-checkout failure, not a default).
 
 The assistant's own Bash shell on host `link` can reach the graphical session,
 so headed Playwright (`dump-dom`, `dry-run`, `login`) can be driven directly

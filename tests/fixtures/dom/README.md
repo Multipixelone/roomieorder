@@ -60,11 +60,13 @@ clean. Keep the resulting file ≤ ~300 KB.
 - **`costco_product_out_of_stock.html`** — no delivery-unavailable PDP has been
   captured (every dumped item was in stock). The `_check_availability` test
   skips until one is dropped in.
-- **`costco_checkout_review.html`** — `dump-dom` stops at the product page and
-  never proceeds to checkout, so no SinglePageCheckoutView HTML exists to
-  sanitize (only `*_review.png` screenshots do). The `PLACE_ORDER_SELECTORS` /
-  `PAYMENT_METHOD_SELECTORS` / `ORDER_TOTAL_SELECTORS` test skips until a
-  logged-in, PII-scrubbed review-page capture is committed here.
+- **`costco_checkout_review.html`** — `dump-dom` stops at the product page, but
+  `roomieorder trace-order <item>` (DRY_RUN) now drives the flow to the review
+  page and dumps a `*_checkout_landed_dom.html` of SinglePageCheckoutView. Drop a
+  logged-in, PII-scrubbed capture from that step here (sanitize per the rule
+  above — the checkout body renders the member name, address, and card last-4) to
+  un-skip the `PLACE_ORDER_SELECTORS` / `PAYMENT_METHOD_SELECTORS` /
+  `ORDER_TOTAL_SELECTORS` test.
 - **Confirmation page** — only reachable past a real Place Order; it remains the
   project's standing 🔵 caveat (AGENTS.md §1), out of scope for this harness.
 

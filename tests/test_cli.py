@@ -200,6 +200,76 @@ def test_verify_selectors_no_source_for_provider(env: Path, monkeypatch: pytest.
     assert "no items declare a amazon source" in result.output
 
 
+# ─────────── trace-order arg handling + dry-run contract (no browser) ───────────
+
+
+def test_trace_order_unknown_item(env: Path) -> None:
+    result = CliRunner().invoke(main, ["trace-order", "nope"])
+    assert result.exit_code != 0
+    assert "unknown item_key" in result.output
+
+
+def test_trace_order_no_source_for_provider(env: Path) -> None:
+    result = CliRunner().invoke(main, ["trace-order", "dish_soap", "--provider", "amazon"])
+    assert result.exit_code != 0
+    assert "no amazon source" in result.output
+
+
+def test_trace_order_forces_dry_run_and_prints_steps(
+    env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from roomieorder.purchase import PurchaseResult, TraceStep
+
+    # DRY_RUN off in the env must NOT reach the buy: trace-order hard-forces it.
+    monkeypatch.setenv("DRY_RUN", "false")
+    seen: dict[str, object] = {}
+
+    class _FakePurchaser:
+        config: object = None
+
+        def _resolve_url(self, source: object) -> str:
+            return "https://example.test/p"
+
+        def buy(self, item_key, item, source, proceed_check, *, tracer):  # type: ignore[no-untyped-def]
+            seen["dry_run"] = self.config.dry_run  # type: ignore[attr-defined]
+            seen["tracer"] = tracer
+            tracer.steps.append(
+                TraceStep(
+                    name="product_loaded",
+                    idx=1,
+                    url="https://example.test/p",
+                    summary="[price]\n  sel  count=1\n",
+                    probe=Path("/tmp/p_probe.txt"),
+                )
+            )
+            tracer.steps.append(
+                TraceStep(
+                    name="checkout_landed",
+                    idx=2,
+                    url="https://example.test/checkout",
+                    summary="[place-order]\n  sel  count=1\n[order-total]\n  sel  count=1\n",
+                    probe=Path("/tmp/c_probe.txt"),
+                )
+            )
+            return PurchaseResult(status="dry_run", unit_price=24.99, order_total=27.39)
+
+    def _fake_purchaser_for(config: object, provider: str) -> object:
+        p = _FakePurchaser()
+        p.config = config
+        return p
+
+    monkeypatch.setattr(cli, "_purchaser_for", _fake_purchaser_for)
+    result = CliRunner().invoke(main, ["trace-order", "paper_towels"])
+    assert result.exit_code == 0, result.output
+    assert seen["dry_run"] is True  # forced on despite DRY_RUN=false
+    assert "01 product_loaded" in result.output
+    assert "02 checkout_landed" in result.output
+    # The checkout step is where place-order/order-total finally resolve.
+    assert "place-order=ok" in result.output
+    assert "order-total=ok" in result.output
+    assert "status:      dry_run" in result.output
+
+
 # ─────────── summary parsing helpers ───────────
 
 _SAMPLE_SUMMARY = """\

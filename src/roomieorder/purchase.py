@@ -30,7 +30,10 @@ Run order inside :meth:`BasePurchaser.buy`:
 ⚠️ Every selector, marker, and order-number regex below is a best-guess against a
 live DOM nobody here can see. Each DOM-dependent constant is flagged
 ``# TODO(<store>): verify against live DOM`` and MUST be confirmed during bring-up
-(`roomieorder login` / `dry-run` / `dump-dom`).
+(`roomieorder login` / `dry-run` / `dump-dom` / `trace-order`). The checkout-only
+selectors (place-order / order-total / payment) render past the product page, so
+`trace-order` — which dumps a DOM + probe + screenshot at every checkout step — is
+the tool that reaches them.
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, Optional, TypeVar
@@ -110,8 +113,9 @@ _JSONLD_SELECTOR = "script[type='application/ld+json']"
 # below the fold, which a header-only shot crops out. The happy-path `review`
 # and `confirmation` shots and the `dump` bring-up shot stay header-only — they
 # go out over the notifier, where a tall full-page PNG is just bulk. The
-# blocked_/challenge_/signin_ families carry a `_{where}` suffix, so they match
-# by prefix.
+# blocked_/challenge_/signin_ families carry a `_{where}` suffix, and the
+# `trace…` family (FlowTracer's per-step `{run_id}_{NN}_{name}` tags) wants the
+# whole cart/review page, so they match by prefix.
 _FULL_PAGE_TAGS = frozenset(
     {
         "no_price",
@@ -126,7 +130,7 @@ _FULL_PAGE_TAGS = frozenset(
         "crash",
     }
 )
-_FULL_PAGE_TAG_PREFIXES = ("blocked_", "challenge_", "signin_")
+_FULL_PAGE_TAG_PREFIXES = ("blocked_", "challenge_", "signin_", "trace")
 
 
 def _is_full_page_tag(tag: str) -> bool:
@@ -172,6 +176,103 @@ class DumpResult:
     probe: Optional[Path] = None
     screenshot: Optional[Path] = None
     summary: str = ""
+
+
+@dataclass
+class TraceStep:
+    """One checkpoint captured by a :class:`FlowTracer` mid-:meth:`BasePurchaser.buy`.
+
+    Parallels :class:`DumpResult` but stamped with the checkpoint's ordinal
+    (``idx``) and ``name`` so a whole order's steps sort and group together."""
+
+    name: str
+    idx: int
+    url: str = ""
+    logged_in: bool = False
+    blocked: bool = False
+    challenge: bool = False
+    html: Optional[Path] = None
+    probe: Optional[Path] = None
+    screenshot: Optional[Path] = None
+    summary: str = ""
+
+
+class _NullTracer:
+    """The default, do-nothing tracer threaded through every live ``buy()``.
+
+    A single shared singleton (:data:`_NULL_TRACER`) is the default argument, so
+    a production worker/orchestrator buy pays only one inert method call per
+    checkpoint — no ``page.content()``, no probe, no screenshot, no I/O. This is
+    the property that keeps a money-moving order byte-for-byte identical to today
+    whether or not tracing exists."""
+
+    def checkpoint(self, page: "Page", name: str) -> None:  # noqa: D102 — no-op
+        return None
+
+
+_NULL_TRACER = _NullTracer()
+
+
+def new_run_id() -> str:
+    """A short per-order id (``trace{HHMMSS}``) prefixing one run's trace files.
+
+    Keeps every checkpoint of a single buy grouped and chronologically sortable
+    in the flat ``shots_dir`` without a subdirectory. The ``trace`` prefix also
+    routes the step screenshots to a full-page capture (see ``_FULL_PAGE_TAG_PREFIXES``)."""
+    return "trace" + datetime.now(timezone.utc).strftime("%H%M%S")
+
+
+@dataclass
+class FlowTracer:
+    """Captures DOM + selector probe + screenshot at each buy-flow checkpoint.
+
+    Attached only by the ``trace-order`` CLI command (and the opt-in live trace),
+    never by a default buy. It rides the *real* :meth:`BasePurchaser.buy` path —
+    no parallel walk that could drift — so the selectors it probes are exactly
+    the ones the order would hit. Every checkpoint is best-effort: a capture
+    failure is logged and swallowed so it can never alter the order's outcome.
+
+    Filenames are tagged ``{run_id}_{NN}_{name}`` so one order's artifacts sort
+    chronologically and group together in the flat ``shots_dir``."""
+
+    purchaser: "BasePurchaser[Any]"
+    item_key: str
+    run_id: str
+    steps: list[TraceStep] = field(default_factory=list)
+    _idx: int = 0
+
+    def checkpoint(self, page: "Page", name: str) -> None:
+        self._idx += 1
+        idx = self._idx
+        log = correlated(_logger, provider=self.purchaser.PROVIDER, item=self.item_key)
+        step = TraceStep(name=name, idx=idx)
+        tag = f"{self.run_id}_{idx:02d}_{name}"
+        try:
+            step.url = page.url
+        except Exception:  # noqa: BLE001 — best-effort
+            pass
+        for attr, fn in (
+            ("logged_in", self.purchaser.is_logged_in),
+            ("blocked", self.purchaser._is_blocked),
+            ("challenge", self.purchaser._is_challenge),
+        ):
+            try:
+                setattr(step, attr, bool(fn(page)))
+            except Exception:  # noqa: BLE001 — best-effort
+                pass
+        try:
+            step.summary = self.purchaser._probe_selectors(page)
+        except Exception as exc:  # noqa: BLE001 — a probe miss must not abort the buy
+            step.summary = f"probe failed: {exc}"
+        step.html = self.purchaser._write_text(
+            self.item_key, f"{tag}_dom", "html", self.purchaser._page_html(page)
+        )
+        step.probe = self.purchaser._write_text(
+            self.item_key, f"{tag}_probe", "txt", step.summary
+        )
+        step.screenshot = self.purchaser._screenshot(page, self.item_key, tag)
+        self.steps.append(step)
+        log.info("trace checkpoint %02d %s → %s", idx, name, step.probe)
 
 
 # proceed_check(live_price) -> GuardResult. Lets the worker run price-ceiling
@@ -342,8 +443,13 @@ class BasePurchaser(Generic[SourceT]):
         """A short id for log/probe messages, e.g. ``item #1640526``."""
         raise NotImplementedError
 
-    def _start_checkout(self, page: "Page") -> bool:
-        """Reach the place-order review page from the product page."""
+    def _start_checkout(
+        self, page: "Page", *, tracer: "_NullTracer | FlowTracer" = _NULL_TRACER
+    ) -> bool:
+        """Reach the place-order review page from the product page.
+
+        ``tracer`` (default no-op) checkpoints the store-specific sub-steps —
+        add-to-cart, cart, payment — so ``trace-order`` captures each section."""
         raise NotImplementedError
 
     def _reset_cart(self, page: "Page") -> None:
@@ -475,6 +581,8 @@ class BasePurchaser(Generic[SourceT]):
         item: CatalogItem,
         source: SourceT,
         proceed_check: ProceedCheck,
+        *,
+        tracer: "_NullTracer | FlowTracer" = _NULL_TRACER,
     ) -> PurchaseResult:
         """Execute (or dry-run) the buy of ``source`` for ``item``.
 
@@ -482,6 +590,11 @@ class BasePurchaser(Generic[SourceT]):
         programmer errors, not store flakiness — those become a ``failed`` result
         with a screenshot. A ``unavailable`` result (sold out / not carried /
         not found) signals the orchestrator to try the other store.
+
+        ``tracer`` defaults to a shared no-op (:data:`_NULL_TRACER`): a normal
+        worker/orchestrator buy pays only one inert call per checkpoint. Pass a
+        :class:`FlowTracer` (the ``trace-order`` CLI does, forcing DRY_RUN) to
+        dump a DOM + selector probe + screenshot at every step of the way.
         """
         api = _playwright_api()
         PWTimeout = api.TimeoutError  # type: ignore[attr-defined]
@@ -561,6 +674,7 @@ class BasePurchaser(Generic[SourceT]):
                 # Check before the price read: a 404 / sold-out page may carry no
                 # price, and we want `unavailable` (fall back), not `failed`.
                 self._settle(page)
+                tracer.checkpoint(page, "product_loaded")
                 reason = self._check_availability(page, http_status)
                 if reason is not None:
                     shot = self._screenshot(page, item_key, "unavailable")
@@ -597,11 +711,13 @@ class BasePurchaser(Generic[SourceT]):
                         screenshot=shot,
                     )
 
+                tracer.checkpoint(page, "price_read")
+
                 # ── reach the review page ──
                 # From here we drive add-to-cart, so a later failure is no longer
                 # money-safe to auto-retry.
                 cart_touched = True
-                if not self._start_checkout(page):
+                if not self._start_checkout(page, tracer=tracer):
                     # A failure here means we never confirmed the review page. An
                     # Akamai block or a sign-in bounce mid-drive lands here too, so
                     # classify those first (worker pauses) instead of mislabelling
@@ -663,6 +779,9 @@ class BasePurchaser(Generic[SourceT]):
                 # bounded window the landing check uses before reading.
                 self._wait_for_any(page, self.ORDER_TOTAL_SELECTORS, timeout=self._LANDING_TIMEOUT_MS)
                 review_total = self._read_total(page)
+                # The review page is where the place-order/order-total/payment
+                # selector groups finally render — the surface dump-dom can't reach.
+                tracer.checkpoint(page, "checkout_landed")
 
                 # ── hard cart-contents guard (⚠️ real money) ──
                 # A live Place Order checks out the *whole* cart, and _reset_cart
@@ -680,6 +799,7 @@ class BasePurchaser(Generic[SourceT]):
 
                 # ── DRY_RUN stops here ──
                 if self.config.dry_run:
+                    tracer.checkpoint(page, "review_pre_place")
                     shot = self._screenshot(page, item_key, "review")
                     msg = f"[DRY] would order {item_key} at ${price:.2f}"
                     if review_total is not None:
@@ -1689,7 +1809,9 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
         self._settle(page)
         return self.is_logged_in(page)
 
-    def _start_checkout(self, page: "Page") -> bool:
+    def _start_checkout(
+        self, page: "Page", *, tracer: "_NullTracer | FlowTracer" = _NULL_TRACER
+    ) -> bool:
         """Add to cart → go to cart → checkout → select payment → review.
 
         Costco has no one-click Buy Now: the flow is add-to-cart, then the cart,
@@ -1708,6 +1830,7 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
             return False
         page.wait_for_load_state("domcontentloaded")
         self._settle(page)
+        tracer.checkpoint(page, "cart_added")
 
         # ── go to cart → checkout ──
         # Prefer the flyout's Checkout CTA; if that doesn't land us on the
@@ -1722,6 +1845,7 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
                 wait_until="domcontentloaded",
             )
             self._settle(page)
+            tracer.checkpoint(page, "cart_view")
             self._click_by_role(page, ("button", "link"), "checkout")
             self._settle(page)
             if not self._on_checkout(page):
@@ -1731,11 +1855,13 @@ class CostcoPurchaser(BasePurchaser[CostcoSource]):
         # TODO(costco): verify against live DOM — does delivery need a click?
         self._click_by_role(page, ("button", "link"), "continue")
         self._settle(page)
+        tracer.checkpoint(page, "delivery_continue")
 
         # ── select the saved default payment method ──
         # Place Order is inert until a payment method is chosen, and the saved
         # card isn't reliably pre-selected, so click its radio here.
         self._select_payment_method(page)
+        tracer.checkpoint(page, "payment_selected")
         return True
 
     def _on_checkout(self, page: "Page") -> bool:
@@ -2083,24 +2209,30 @@ class AmazonPurchaser(BasePurchaser[AmazonSource]):
         """
         )
 
-    def _start_checkout(self, page: "Page") -> bool:
+    def _start_checkout(
+        self, page: "Page", *, tracer: "_NullTracer | FlowTracer" = _NULL_TRACER
+    ) -> bool:
         """Click Buy Now; fall back to Add to Cart → Proceed to checkout.
         TODO(amazon): verify against live DOM — every step below.
         """
         if self._click_first(page, self.BUY_NOW_SELECTORS):
+            tracer.checkpoint(page, "buy_now")
             return True
         if not self._click_first(page, self.ADD_TO_CART_SELECTORS):
             return False
         # Cart interstitial → checkout.
         page.wait_for_load_state("domcontentloaded")
+        tracer.checkpoint(page, "cart_added")
         for sel in ("#sc-buy-box-ptc-button", "input[name='proceedToRetailCheckout']"):
             if self._click_first(page, (sel,)):
+                tracer.checkpoint(page, "proceed_checkout")
                 return True
         # Some flows expose a role-named link instead.
         try:
             page.get_by_role(
                 "link", name=re.compile("proceed to checkout", re.I)
             ).first.click(timeout=5_000)
+            tracer.checkpoint(page, "proceed_checkout")
             return True
         except Exception:  # noqa: BLE001
             return False

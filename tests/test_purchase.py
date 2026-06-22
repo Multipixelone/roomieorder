@@ -4,17 +4,22 @@ from __future__ import annotations
 # Test stubs are intentionally duck-typed fakes that implement only the Page
 # subset each test exercises; casting every call site would add noise.
 
+from pathlib import Path
+
 import pytest
 
 from roomieorder.catalog import load_catalog
 from roomieorder.config import Config
 from roomieorder.purchase import (
     _JSONLD_SELECTOR,
+    _NULL_TRACER,
     AmazonPurchaser,
     CostcoPurchaser,
+    FlowTracer,
     _is_full_page_tag,
     _price_from_jsonld,
     looks_like,
+    new_run_id,
     parse_price,
 )
 
@@ -821,8 +826,112 @@ def test_cart_guard_base_hook_is_noop_for_amazon(config: Config) -> None:
 def test_amazon_start_checkout_clicks_buy_now(config: Config) -> None:
     page = _FakePage()
     page.present = {AmazonPurchaser.BUY_NOW_SELECTORS[0]}
+    # No tracer arg → the default no-op; the checkout flow is unchanged.
     assert _amazon(config)._start_checkout(page) is True
     assert page.clicked == [AmazonPurchaser.BUY_NOW_SELECTORS[0]]
+
+
+# ─────────── flow tracer (full-flow dump for trace-order) ───────────
+
+
+class _RecordingTracer:
+    """Captures only the checkpoint names, in order — enough to assert that the
+    tracer is threaded through the buy-flow sub-steps."""
+
+    def __init__(self) -> None:
+        self.names: list[str] = []
+
+    def checkpoint(self, page: object, name: str) -> None:
+        self.names.append(name)
+
+
+class _RecordingPurchaser:
+    """Duck-typed stand-in for the helpers FlowTracer.checkpoint calls, so the
+    tracer's orchestration (idx, file tags, best-effort) is testable without a
+    browser or a real purchaser."""
+
+    PROVIDER = "costco"
+
+    def __init__(self, probe_raises: bool = False) -> None:
+        self.writes: list[tuple[str, str, str]] = []
+        self.shots: list[str] = []
+        self._probe_raises = probe_raises
+
+    def is_logged_in(self, page: object) -> bool:
+        return True
+
+    def _is_blocked(self, page: object, status: object = None) -> bool:
+        return False
+
+    def _is_challenge(self, page: object) -> bool:
+        return False
+
+    def _probe_selectors(self, page: object) -> str:
+        if self._probe_raises:
+            raise RuntimeError("boom")
+        return "[place-order]\n  sel  count=1\n"
+
+    def _page_html(self, page: object) -> str:
+        return "<html></html>"
+
+    def _write_text(self, item_key: str, tag: str, ext: str, content: str):  # type: ignore[no-untyped-def]
+        self.writes.append((item_key, tag, ext))
+        return Path(f"/tmp/{tag}.{ext}")
+
+    def _screenshot(self, page: object, item_key: str, tag: str):  # type: ignore[no-untyped-def]
+        self.shots.append(tag)
+        return Path(f"/tmp/{tag}.png")
+
+
+def test_null_tracer_checkpoint_is_noop() -> None:
+    # The default tracer on a live buy must do nothing and never raise.
+    assert _NULL_TRACER.checkpoint(_FakePage(), "product_loaded") is None
+
+
+def test_new_run_id_is_trace_prefixed() -> None:
+    # The `trace` prefix groups a run's files and routes shots to full-page.
+    run_id = new_run_id()
+    assert run_id.startswith("trace")
+    assert _is_full_page_tag(f"{run_id}_01_product_loaded") is True
+
+
+def test_flow_tracer_captures_each_checkpoint() -> None:
+    p = _RecordingPurchaser()
+    tracer = FlowTracer(p, "paper_towels", run_id="trace120000")  # type: ignore[arg-type]
+    page = _FakePage(url="https://www.costco.com/checkout")
+
+    tracer.checkpoint(page, "product_loaded")
+    tracer.checkpoint(page, "checkout_landed")
+
+    assert [s.name for s in tracer.steps] == ["product_loaded", "checkout_landed"]
+    assert [s.idx for s in tracer.steps] == [1, 2]
+    # Tags carry the run_id, a zero-padded ordinal, and the checkpoint name.
+    assert ("paper_towels", "trace120000_01_product_loaded_dom", "html") in p.writes
+    assert ("paper_towels", "trace120000_02_checkout_landed_probe", "txt") in p.writes
+    assert "trace120000_02_checkout_landed" in p.shots
+    assert tracer.steps[0].summary.startswith("[place-order]")
+    assert tracer.steps[1].url == "https://www.costco.com/checkout"
+
+
+def test_flow_tracer_survives_probe_failure() -> None:
+    # A probe error at one checkpoint must not abort the buy — it's recorded and
+    # the DOM/screenshot are still written.
+    p = _RecordingPurchaser(probe_raises=True)
+    tracer = FlowTracer(p, "paper_towels", run_id="trace1")  # type: ignore[arg-type]
+    tracer.checkpoint(_FakePage(), "checkout_landed")
+    assert len(tracer.steps) == 1
+    assert "probe failed" in tracer.steps[0].summary
+    assert any(tag.endswith("_dom") for _, tag, _ in p.writes)
+    assert p.shots == ["trace1_01_checkout_landed"]
+
+
+def test_amazon_start_checkout_threads_tracer(config: Config) -> None:
+    # The tracer reaches the store-specific sub-steps: Buy Now fires one checkpoint.
+    page = _FakePage()
+    page.present = {AmazonPurchaser.BUY_NOW_SELECTORS[0]}
+    rec = _RecordingTracer()
+    assert _amazon(config)._start_checkout(page, tracer=rec) is True  # type: ignore[arg-type]
+    assert rec.names == ["buy_now"]
 
 
 # ─────────── order-id extraction ───────────
