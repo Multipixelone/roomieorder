@@ -2056,9 +2056,16 @@ class AmazonPurchaser(BasePurchaser[AmazonSource]):
     """Amazon — the fallback when Costco can't fulfil an item.
 
     Restored from the pre-costco-switch buy flow (commit 9057046^). The DOM
-    moves fast and these selectors are multi-year-old guesses, so every one is
-    flagged ``TODO(amazon)`` and must be confirmed via
-    `roomieorder dump-dom --provider amazon <item>` before any live order.
+    moves fast, so each selector group is annotated with how it was confirmed.
+
+    Verified against a live ``trace-order`` run (2026-06-22, ASIN B0DQYP1L95):
+    PDP price/add-to-cart/buy-now (also dumped 2026-06-21), account nav, and —
+    on the Buy Now "Chewbacca" SPC review page — the place-order and order-total
+    selectors. Buy Now skips the cart, so the cart ``proceed-to-checkout``
+    selectors in ``_start_checkout`` are untested (only reached for items without
+    Buy Now). The ``CONFIRMATION_*`` markers stay unverified: ``trace-order``
+    halts before the final click, so only a real placed order proves them.
+    Remaining ``TODO(amazon)`` groups still need a live page to confirm.
     """
 
     PROVIDER = "amazon"
@@ -2095,21 +2102,31 @@ class AmazonPurchaser(BasePurchaser[AmazonSource]):
         "#add-to-cart-button",
         "input[name='submit.add-to-cart']",
     )
-    # TODO(amazon): verify against live DOM — final place-order button.
+    # Final place-order button. Verified against the live Buy Now "Chewbacca" SPC
+    # review page (2026-06-22): input[name='placeYourOrder1'] and the
+    # #submitOrderButtonId / #bottomSubmitOrderButtonId inputs are present; the
+    # legacy #placeYourOrder id is gone (kept last as a fallback for other
+    # pipelines). _place_order also tries the role-named "Place your order" button
+    # first, which is the drift-resistant primary handle.
     PLACE_ORDER_SELECTORS = (
-        "#placeYourOrder",
         "input[name='placeYourOrder1']",
         "#submitOrderButtonId input",
         "#bottomSubmitOrderButtonId input",
+        "#placeYourOrder",
     )
-    # TODO(amazon): verify against live DOM — order-confirmation grand-total.
+    # Order total on the Buy Now "Chewbacca" SPC review page, verified against the
+    # live trace (2026-06-22): #subtotals-marketplace-table still wraps the totals,
+    # but the grand-total amount moved to a data-shimmer-target span inside a
+    # li.grand-total-cell (the old .grand-total-price / td / #od-subtotals markup is
+    # gone). Lead with the amount span, fall back to the whole "Order total: $X" li.
     ORDER_TOTAL_SELECTORS = (
-        "#subtotals-marketplace-table .grand-total-price",
-        "td.grand-total-price",
-        "#od-subtotals .a-color-price",
+        "#subtotals-marketplace-table span[data-shimmer-target='ordertotals-amount']",
+        ".grand-total-cell",
     )
-    # TODO(amazon): verify against live DOM — account nav (reads "Hello, sign in"
-    # when logged out).
+    # Account nav (reads "Hello, sign in" when logged out). Verified against the
+    # live trace (2026-06-22): present on the PDP (logged-in detection works).
+    # Note it is absent on the SPC checkout pages, which carry no nav bar — the
+    # logged-in check only runs on the product page, so that's expected.
     ACCOUNT_NAV_SELECTORS = (
         "#nav-link-accountList-nav-line-1",
         "#nav-link-accountList",

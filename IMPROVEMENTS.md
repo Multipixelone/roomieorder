@@ -295,6 +295,23 @@ next line — fold into one.
   `review_pre_place` by design, so it can't reach them (see `PROGRESS.md` and project
   memory). Items #2, #3 above hardened the parts that can be fixed *structurally*,
   independent of selector bring-up.
+- **Amazon checkout selectors verified via `trace-order` (2026-06-22).** First live
+  Amazon trace (`trace-order paper_towels --provider amazon`, real ASIN `B0DQYP1L95`)
+  resolved the long-standing `TODO(amazon)` checkout layer. Live Buy Now routes straight
+  to Amazon's **"Chewbacca" turbo checkout** (`/checkout/p/.../spc?isBuyNow=1`), skipping
+  the cart. On that review page: **`PLACE_ORDER_SELECTORS` confirmed** —
+  `input[name='placeYourOrder1']` and `#submitOrderButtonId input` resolve (legacy
+  `#placeYourOrder` is gone, kept last). **`ORDER_TOTAL_SELECTORS` were stale and are now
+  fixed** — the old `.grand-total-price`/`td.grand-total-price`/`#od-subtotals` markup is
+  count=0; the live total is `#subtotals-marketplace-table span[data-shimmer-target='ordertotals-amount']`
+  (fallback `.grand-total-cell`). `ACCOUNT_NAV_SELECTORS` confirmed on the PDP (logged-in
+  detection), correctly absent on checkout (no nav bar). **Still untested:** the cart
+  `proceed-to-checkout` selectors in `_start_checkout` (Buy Now bypasses the cart — only
+  reached for items without Buy Now), and the Amazon `CONFIRMATION_*` markers (past the
+  final click, same 🔵 caveat as Costco). Tooling note: the nix-store `roomieorder` binary
+  is a stale build without `trace-order`; run from the working-tree `src`, and point
+  `ROOMIEORDER_CATALOG` at `nix-secrets/roomieorder/catalog.json` (repo `catalog.json` has
+  placeholder ASINs). Artifacts land in `~/.openclaw/media/roomieorder/`.
 - **Some catalog entries resolve to Grocery-by-Instacart products the buy flow can't
   drive.** Found 2026-06-22: `trace-order paper_towels` failed at the PDP (`price=ok` but
   `add-to-cart=MISS`) because the catalog item now resolves to a *Grocery by Instacart*
