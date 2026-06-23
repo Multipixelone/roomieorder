@@ -415,6 +415,8 @@ def test_session_check_notifies_only_logged_out_provider(
         "roomieorder.main.build_purchaser",
         lambda cfg, provider: _FakePurchaser(provider == "amazon"),
     )
+    # Force the activity gate clear so the probe runs regardless of host state.
+    monkeypatch.setattr("roomieorder.main.activity.busy_gate", lambda cfg: None)
     engine = Engine(config.model_copy(update={"session_check_hours": 24.0}))
     rec = _RecordingNotifier()
     engine.notifier = rec
@@ -433,9 +435,67 @@ def test_session_check_disabled_by_default(config: Config, monkeypatch: pytest.M
         raise AssertionError("session probed while disabled")
 
     monkeypatch.setattr("roomieorder.main.build_purchaser", _boom)
-    engine = Engine(config)  # session_check_hours defaults to 0.0
+    engine = Engine(config.model_copy(update={"session_check_hours": 0.0}))
     try:
         engine._session_check_tick(now=1_000_000.0)  # returns before any probe
+    finally:
+        engine.store.close()
+
+
+def test_session_check_deferred_when_busy(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A busy gate skips the probe AND leaves the interval timer unadvanced so
+    the next poll re-checks (retry-soon), instead of burning the whole interval."""
+    from roomieorder.main import Engine
+
+    config.costco_profile_dir.mkdir(parents=True)
+    config.amazon_profile_dir.mkdir(parents=True)
+
+    def _boom(cfg: object, provider: str) -> object:
+        raise AssertionError("probed while the operator is busy")
+
+    monkeypatch.setattr("roomieorder.main.build_purchaser", _boom)
+    monkeypatch.setattr(
+        "roomieorder.main.activity.busy_gate", lambda cfg: "gamemode active"
+    )
+    engine = Engine(config.model_copy(update={"session_check_hours": 24.0}))
+    try:
+        engine._session_check_tick(now=1_000_000.0)
+        # No probe ran (no AssertionError) and the timer stayed put, so the next
+        # poll will try again the moment the gate clears.
+        assert engine._last_session_check == 0.0
+    finally:
+        engine.store.close()
+
+
+def test_session_check_runs_when_gate_clear(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A clear gate runs the probe and advances the interval timer."""
+    from roomieorder.main import Engine
+
+    config.costco_profile_dir.mkdir(parents=True)
+
+    probed: list[str] = []
+
+    class _FakePurchaser:
+        def __init__(self, provider: str) -> None:
+            self._provider = provider
+
+        def verify_session(self) -> bool:
+            probed.append(self._provider)
+            return True
+
+    monkeypatch.setattr(
+        "roomieorder.main.build_purchaser", lambda cfg, provider: _FakePurchaser(provider)
+    )
+    monkeypatch.setattr("roomieorder.main.activity.busy_gate", lambda cfg: None)
+    engine = Engine(config.model_copy(update={"session_check_hours": 24.0}))
+    try:
+        engine._session_check_tick(now=1_000_000.0)
+        assert probed == ["costco"]
+        assert engine._last_session_check == 1_000_000.0
     finally:
         engine.store.close()
 

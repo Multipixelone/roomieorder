@@ -161,6 +161,29 @@ class Config(BaseModel):
     # 0 disables it.
     session_check_hours: float = Field(default=3.0, ge=0.0)
 
+    # Activity gate for the session-freshness probe. The probe launches a *headed*
+    # Chrome window on the live desktop, so when it's due it waits until the
+    # operator is away rather than stealing focus mid-game / mid-work. Deferral is
+    # cheap and re-evaluated every worker poll, so the probe fires within seconds
+    # of the operator going idle / quitting the game / entering the window — the
+    # interval timer only advances on a probe that actually runs. Any tripped
+    # signal defers; see activity.busy_gate.
+    #
+    # Only probe inside this local-time window, e.g. "03:00-08:00" (wrap past
+    # midnight allowed, "22:00-06:00"). Empty (default) = any time.
+    session_check_window: str = ""
+    # Skip while a game is running under gamemode. The command's stdout is matched
+    # for "is active"; a missing binary / non-zero exit means "not gaming".
+    session_check_skip_gamemode: bool = True
+    session_check_gamemode_cmd: str = "gamemoded -s"
+    # Require this many minutes of idle (no input) before probing; 0 (default)
+    # disables the idle signal. Wayland/Hyprland has no universal idle query, so
+    # the idle seconds come from session_check_idle_cmd (operator-wired). When a
+    # threshold is set but the command is unset or fails we can't prove the
+    # operator is away, so we defer (never pop a window we're unsure about).
+    session_check_idle_minutes: float = Field(default=0.0, ge=0.0)
+    session_check_idle_cmd: str = ""
+
     @property
     def sheets_enabled(self) -> bool:
         return bool(self.sheet_id and self.google_service_account_json)
@@ -207,7 +230,7 @@ def load_config() -> Config:
     :meth:`Config.notify_enabled`), not here, so the service can boot even
     before every integration is wired up.
     """
-    return Config(
+    cfg = Config(
         dry_run=_env_bool("DRY_RUN", True),
         daily_cap=_env_float("ROOMIEORDER_DAILY_CAP", 200.0),
         debounce_seconds=_env_int("ROOMIEORDER_DEBOUNCE_SECONDS", 60),
@@ -240,4 +263,22 @@ def load_config() -> Config:
         heartbeat_url=_env_str("ROOMIEORDER_HEARTBEAT_URL", ""),
         heartbeat_interval_seconds=_env_int("ROOMIEORDER_HEARTBEAT_INTERVAL_SECONDS", 300),
         session_check_hours=_env_float("ROOMIEORDER_SESSION_CHECK_HOURS", 3.0),
+        session_check_window=_env_str("ROOMIEORDER_SESSION_CHECK_WINDOW", ""),
+        session_check_skip_gamemode=_env_bool(
+            "ROOMIEORDER_SESSION_CHECK_SKIP_GAMEMODE", True
+        ),
+        session_check_gamemode_cmd=_env_str(
+            "ROOMIEORDER_SESSION_CHECK_GAMEMODE_CMD", "gamemoded -s"
+        ),
+        session_check_idle_minutes=_env_float(
+            "ROOMIEORDER_SESSION_CHECK_IDLE_MINUTES", 0.0
+        ),
+        session_check_idle_cmd=_env_str("ROOMIEORDER_SESSION_CHECK_IDLE_CMD", ""),
     )
+    # Reject a malformed probe window at startup rather than letting it raise
+    # inside the worker loop. Late import avoids an activity↔config import cycle.
+    if cfg.session_check_window.strip():
+        from roomieorder.activity import _parse_window
+
+        _parse_window(cfg.session_check_window.strip())  # raises ConfigError if bad
+    return cfg

@@ -24,6 +24,11 @@ def test_defaults_when_env_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.heartbeat_url == ""
     assert cfg.heartbeat_interval_seconds == 300
     assert cfg.session_check_hours == 3.0
+    assert cfg.session_check_window == ""
+    assert cfg.session_check_skip_gamemode is True
+    assert cfg.session_check_gamemode_cmd == "gamemoded -s"
+    assert cfg.session_check_idle_minutes == 0.0
+    assert cfg.session_check_idle_cmd == ""
     assert cfg.step_timeout_ms == 20_000
     assert cfg.landing_timeout_ms == 8_000
     assert cfg.sheets_enabled is False
@@ -43,6 +48,11 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ROOMIEORDER_HEARTBEAT_URL", "https://hc.example.com/ping/abc")
     monkeypatch.setenv("ROOMIEORDER_HEARTBEAT_INTERVAL_SECONDS", "60")
     monkeypatch.setenv("ROOMIEORDER_SESSION_CHECK_HOURS", "12")
+    monkeypatch.setenv("ROOMIEORDER_SESSION_CHECK_WINDOW", "03:00-08:00")
+    monkeypatch.setenv("ROOMIEORDER_SESSION_CHECK_SKIP_GAMEMODE", "false")
+    monkeypatch.setenv("ROOMIEORDER_SESSION_CHECK_GAMEMODE_CMD", "mygame -s")
+    monkeypatch.setenv("ROOMIEORDER_SESSION_CHECK_IDLE_MINUTES", "5")
+    monkeypatch.setenv("ROOMIEORDER_SESSION_CHECK_IDLE_CMD", "idle.sh")
     monkeypatch.setenv("ROOMIEORDER_STEP_TIMEOUT_MS", "30000")
     monkeypatch.setenv("ROOMIEORDER_LANDING_TIMEOUT_MS", "5000")
     cfg = load_config()
@@ -58,12 +68,23 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.heartbeat_url == "https://hc.example.com/ping/abc"
     assert cfg.heartbeat_interval_seconds == 60
     assert cfg.session_check_hours == 12.0
+    assert cfg.session_check_window == "03:00-08:00"
+    assert cfg.session_check_skip_gamemode is False
+    assert cfg.session_check_gamemode_cmd == "mygame -s"
+    assert cfg.session_check_idle_minutes == 5.0
+    assert cfg.session_check_idle_cmd == "idle.sh"
     assert cfg.step_timeout_ms == 30_000
     assert cfg.landing_timeout_ms == 5_000
 
 
 def test_bad_number_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ROOMIEORDER_DAILY_CAP", "not-a-number")
+    with pytest.raises(ConfigError):
+        load_config()
+
+
+def test_malformed_session_window_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ROOMIEORDER_SESSION_CHECK_WINDOW", "not-a-window")
     with pytest.raises(ConfigError):
         load_config()
 

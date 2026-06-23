@@ -25,7 +25,7 @@ from typing import AsyncIterator, Optional
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
-from roomieorder import heartbeat
+from roomieorder import activity, heartbeat
 from roomieorder.catalog import Catalog, CatalogError, CatalogItem, load_catalog
 from roomieorder.config import Config, load_config
 from roomieorder.guards import check_intake
@@ -241,6 +241,14 @@ class Engine:
             return
         now = time.monotonic() if now is None else now
         if now - self._last_session_check < hours * 3600.0:
+            return
+        # The probe opens a headed Chrome window, so once it's due we hold it
+        # until the operator is away (gamemode off, idle, inside the window).
+        # Leave _last_session_check unadvanced so the gate is re-evaluated every
+        # worker poll and the probe fires within seconds of them stepping away.
+        reason = activity.busy_gate(self.config)
+        if reason is not None:
+            _logger.debug("session probe deferred: %s", reason)
             return
         self._last_session_check = now
         profiles = {

@@ -236,3 +236,26 @@ The actual running instance lives outside this repo:
 **If asked to change "the items" or catalog for the live system:** edit the
 deployment's catalog in `infra`/`nix-secrets`, not this repo's
 `catalog.json`. To inspect the live dashboard, see `DASHBOARD.md`.
+
+## 5. The session-freshness probe runs *headed* — it has an activity gate
+
+`_session_check_tick` (`main.py`) periodically calls `verify_session()`, which
+opens a **real, focus-stealing Chrome window** on the operator's live desktop.
+On a blind timer it would pop up mid-game / mid-work, so `activity.busy_gate`
+(`activity.py`) holds the probe until the operator is away: any of a time
+**window**, **gamemode** active, or **non-idle** user defers it. Key points:
+
+- **Retry-soon, not skip.** When deferred, `_last_session_check` is left
+  unadvanced, so the gate is re-checked every worker poll (5s) and the probe
+  fires the moment the operator clears — the interval only advances on a probe
+  that actually runs. Don't "simplify" this into advancing the timer on defer.
+- **Idle is operator-wired.** Wayland/Hyprland has no universal idle query, so
+  `ROOMIEORDER_SESSION_CHECK_IDLE_CMD` must print idle **seconds**. With a
+  threshold set but the command unset/broken, the gate **defers** (fail-closed:
+  never pop a window we can't prove is unwanted). gamemode + window work alone.
+- **Probes are best-effort, the window is strict.** A missing `gamemoded` /
+  failing idle command is swallowed; a malformed `ROOMIEORDER_SESSION_CHECK_WINDOW`
+  is rejected in `load_config` so it can never raise inside the worker loop.
+- **Verify live, not via CI.** `roomieorder doctor` prints an `activity` line
+  with the current verdict; that's how you confirm gamemode/idle/window
+  detection actually works on `link` (green tests only cover the mocked gate).

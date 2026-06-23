@@ -32,6 +32,7 @@ from typing import Optional
 
 import click
 
+from roomieorder import activity
 from roomieorder.catalog import CatalogItem, load_catalog
 from roomieorder.config import Config, load_config
 from roomieorder.guards import check_price_ceiling, check_spend_cap
@@ -577,6 +578,25 @@ def doctor(check_login: bool) -> None:
             line("warn", "display", f"WAYLAND_DISPLAY={wl} present but ROOMIEORDER_WAYLAND is false — set it?")
         else:
             line("warn", "display", "no DISPLAY/WAYLAND_DISPLAY — the worker can't run a headed browser here")
+
+    # ── session-probe activity gate (would a probe fire right now?) ──
+    # Only meaningful when the probe is enabled; surfaces the live verdict so the
+    # operator can confirm gamemode/idle/window detection works on this box.
+    if config.session_check_hours > 0:
+        bits = []
+        if config.session_check_window:
+            bits.append(f"window {config.session_check_window}")
+        if config.session_check_skip_gamemode:
+            bits.append("gamemode")
+        if config.session_check_idle_minutes > 0:
+            bits.append(f"idle≥{config.session_check_idle_minutes:g}m")
+        gates = ", ".join(bits) if bits else "no gates — always fires"
+        # The window is validated in load_config, so busy_gate can't raise here.
+        reason = activity.busy_gate(config)
+        if reason is None:
+            line("ok", "activity", f"clear — probe would run now ({gates})")
+        else:
+            line("ok", "activity", f"would defer: {reason} ({gates})")
 
     # ── per-store profiles (login can't be confirmed offline — AGENTS.md §2) ──
     for label, path in (("costco", config.costco_profile_dir), ("amazon", config.amazon_profile_dir)):

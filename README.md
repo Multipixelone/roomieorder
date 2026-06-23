@@ -62,6 +62,11 @@ Intake is always-on; execution needs a live graphical session. Requests sit in t
 
 - **Heartbeat** — set `ROOMIEORDER_HEARTBEAT_URL` and the worker pings it on a timer (`ROOMIEORDER_HEARTBEAT_INTERVAL_SECONDS`, default 300). A wedged worker thread stops the pings and your monitor alerts — works with hosted [Healthchecks.io](https://healthchecks.io) or a self-hosted open-source instance, Uptime Kuma push, etc. Empty disables it.
 - **Session freshness** — set `ROOMIEORDER_SESSION_CHECK_HOURS` and the worker periodically relaunches each store profile read-only and notifies you if it's logged out, before a real order fails at the sign-in wall. Default `3`; `0` disables it.
+  - **Activity gate** — the probe opens a *headed* Chrome window, so when it's due it waits until you're away rather than stealing focus mid-game / mid-work. Any of these defers it (and it fires within ~5s of clearing — the interval timer only advances on a probe that runs):
+    - `ROOMIEORDER_SESSION_CHECK_WINDOW` — only probe inside a local-time window, e.g. `03:00-08:00` (wrap past midnight allowed, `22:00-06:00`). Empty (default) = any time. A malformed value fails the service at startup.
+    - `ROOMIEORDER_SESSION_CHECK_SKIP_GAMEMODE` (default `true`) — skip while a game runs under gamemode, detected by `ROOMIEORDER_SESSION_CHECK_GAMEMODE_CMD` (default `gamemoded -s`); stdout containing `is active` defers.
+    - `ROOMIEORDER_SESSION_CHECK_IDLE_MINUTES` (default `0` = off) — require this many idle minutes first. Wayland/Hyprland has no universal idle query, so the idle seconds come from `ROOMIEORDER_SESSION_CHECK_IDLE_CMD` (it must print idle **seconds**); with a threshold set but no/failed command the probe defers rather than risk popping a window.
+  - `roomieorder doctor` prints an `activity` line with the live verdict so you can confirm detection works on your box.
 
 ## Home Assistant integration
 
