@@ -18,7 +18,7 @@ from click.testing import CliRunner
 
 import roomieorder.cli as cli
 from roomieorder.cli import _group_hits, _read_price_from_summary, main
-from roomieorder.store import Store
+from roomieorder.store import LOGIN_PAUSE_MARKER, Store
 
 _CATALOG = {
     "paper_towels": {
@@ -153,6 +153,58 @@ def test_retry_unknown_row(env: Path) -> None:
     result = CliRunner().invoke(main, ["retry", "999"])
     assert result.exit_code != 0
     assert "no queue row #999" in result.output
+
+
+# ─────────── login (pause-clear) ───────────
+
+
+class _FakeLoginPurchaser:
+    """Stand-in for a purchaser: no browser, reports a persisted session."""
+
+    domain = "www.costco.com"
+    profile_dir = "/tmp/profile"
+
+    def login(self, wait_for_operator: object) -> None:  # never calls the blocking cb
+        return None
+
+    def verify_session(self) -> bool:
+        return True
+
+
+def _pause(tmp_path: Path, reason: str) -> None:
+    store = Store(tmp_path / "state.sqlite")
+    store.init_db()
+    store.set_paused(True, reason)
+    store.close()
+
+
+def test_login_resumes_matching_signin_pause(env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A confirmed hand-login clears the sign-in-wall pause that told the operator
+    to run it — closing the 'log in → still paused → logged out again' loop."""
+    _pause(env, f"⚠️ Costco is logged out … run `{LOGIN_PAUSE_MARKER} costco`, then retry")
+    monkeypatch.setattr(cli, "_purchaser_for", lambda config, provider: _FakeLoginPurchaser())
+
+    result = CliRunner().invoke(main, ["login", "--provider", "costco"])
+    assert result.exit_code == 0, result.output
+    assert "resumed" in result.output
+
+    store = Store(env / "state.sqlite")
+    assert store.is_paused() is False
+    store.close()
+
+
+def test_login_leaves_challenge_pause_latched(env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A captcha challenge is not a login pause — `login` must not resume it."""
+    _pause(env, "⚠️ Costco challenge on the product page — worker paused, clear it manually")
+    monkeypatch.setattr(cli, "_purchaser_for", lambda config, provider: _FakeLoginPurchaser())
+
+    result = CliRunner().invoke(main, ["login", "--provider", "costco"])
+    assert result.exit_code == 0, result.output
+    assert "resumed" not in result.output
+
+    store = Store(env / "state.sqlite")
+    assert store.is_paused() is True  # still operator-gated
+    store.close()
 
 
 # ─────────── prune-shots ───────────

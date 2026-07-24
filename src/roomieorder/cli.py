@@ -39,7 +39,7 @@ from roomieorder.guards import check_price_ceiling, check_spend_cap
 from roomieorder.notify import build_notifier
 from roomieorder.retention import prune_shots
 from roomieorder.sheets import build_sheets
-from roomieorder.store import Store
+from roomieorder.store import Store, is_login_pause
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -227,12 +227,34 @@ def login(provider: str) -> None:
     # the persistent ("remember me") cookies were written.
     if purchaser.verify_session():  # type: ignore[attr-defined]
         click.echo("✓ signed in — session persisted (survives restarts and the worker)")
+        _clear_login_pause(config, provider)
     else:
         click.echo(
             "⚠️  the saved profile reloads signed OUT — the session didn’t persist. "
             f"Re-run `roomieorder login --provider {provider}`; if it recurs, the "
             "sign-in form’s rememberMe field needs re-capturing."
         )
+
+
+def _clear_login_pause(config: Config, provider: str) -> None:
+    """After a confirmed hand-login, resume the worker if it was paused by *this*
+    store's sign-in wall.
+
+    The sign-in-wall ``pause_reason`` literally instructs the operator to run
+    ``roomieorder login``, yet nothing else resets the flag — so without this the
+    operator logs in, is told the session persisted, taps the button, and gets the
+    same "logged out" message back: an inescapable loop. Only a matching
+    login/session pause is cleared (``store.is_login_pause``); a challenge,
+    needs-review, crash or manual pause stays operator-gated. Resolves the same
+    ``config.db_path`` the co-located service uses, so it clears the live flag."""
+    store = Store(config.db_path)
+    store.init_db()
+    try:
+        if store.is_paused() and is_login_pause(store.pause_reason(), provider):
+            store.set_paused(False)
+            click.echo(f"✓ worker was paused for {provider} login — resumed")
+    finally:
+        store.close()
 
 
 @main.command(name="dry-run")
@@ -528,6 +550,17 @@ def doctor(check_login: bool) -> None:
     def line(state: str, label: str, detail: str) -> None:
         click.echo(f"{state:4} {label:14} {detail}")
 
+    # ── which universe is this? ──
+    # ROOMIEORDER_DB / _PROFILE_DIR / _CATALOG default to CWD-relative paths, so a
+    # doctor run from the repo checkout can read a *different* DB and profile than
+    # the live systemd service (which cd's to its state dir first). Print the
+    # resolved absolutes + CWD so that mismatch is self-evident and a stale repo
+    # jar is never mistaken for the live one.
+    line("ok", "cwd", os.getcwd())
+    line("ok", "paths/db", str(config.db_path.resolve()))
+    line("ok", "paths/profile", str(config.profile_dir.resolve()))
+    line("ok", "paths/catalog", str(config.catalog_path.resolve()))
+
     # ── config / safety ──
     line("ok", "dry_run", str(config.dry_run))
     line("ok", "daily_cap", f"${config.daily_cap:.2f}")
@@ -603,7 +636,7 @@ def doctor(check_login: bool) -> None:
         if path.exists():
             stamp = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
             present = "present" if check_login else "present (login unverified — run dump-dom)"
-            line("ok", f"profile/{label}", f"{present}, mtime {stamp}")
+            line("ok", f"profile/{label}", f"{present}, {path.resolve()}, mtime {stamp}")
         else:
             line("warn", f"profile/{label}", f"missing {path} — run `roomieorder login --provider {label}`")
             continue
