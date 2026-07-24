@@ -53,7 +53,7 @@ from roomieorder.catalog import AmazonSource, CatalogItem, CostcoSource
 from roomieorder.config import Config
 from roomieorder.guards import GuardResult
 from roomieorder.logutil import correlated
-from roomieorder.store import Status
+from roomieorder.store import LOGIN_PAUSE_MARKER, Status
 
 # Each purchaser drives exactly one store's source shape; bind it so the buy
 # skeleton on the base can pass the concrete CostcoSource/AmazonSource through to
@@ -1556,11 +1556,15 @@ class BasePurchaser(Generic[SourceT]):
         it's logged out. Pause with a clear next step rather than mislabeling the
         login form as a review screenshot."""
         shot = self._screenshot(page, item_key, f"signin_{where}")
+        # Build the remediation hint from LOGIN_PAUSE_MARKER (renders as
+        # "roomieorder login --provider <store>") so the pause_reason string this
+        # becomes always carries the marker that lets `login` / the session probe
+        # auto-clear it — see store.is_login_pause. Don't inline the command text.
         return PurchaseResult(
             status="challenge",
             message=(
                 f"⚠️ {self.STORE_NAME} is logged out (hit the sign-in wall on the "
-                f"{where} page) — run `roomieorder login --provider {self.PROVIDER}`, then retry"
+                f"{where} page) — run `{LOGIN_PAUSE_MARKER} {self.PROVIDER}`, then retry"
             ),
             screenshot=shot,
         )

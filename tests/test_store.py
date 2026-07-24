@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from roomieorder.store import Store, _iso, _utcnow
+from roomieorder.store import LOGIN_PAUSE_MARKER, Store, _iso, _utcnow, is_login_pause
 
 
 def test_enqueue_claim_mark(store: Store) -> None:
@@ -110,3 +110,33 @@ def test_pause_roundtrip(store: Store) -> None:
     assert store.pause_reason() == "captcha"
     store.set_paused(False)
     assert store.is_paused() is False
+
+
+# The exact reason string BasePurchaser._signin_required emits for Costco. Built
+# from the shared marker so this test fails loudly if the two ever drift.
+_SIGNIN_REASON = (
+    "⚠️ Costco is logged out (hit the sign-in wall on the product page) — "
+    f"run `{LOGIN_PAUSE_MARKER} costco`, then retry"
+)
+
+
+def test_is_login_pause_recognises_signin_wall() -> None:
+    assert is_login_pause(_SIGNIN_REASON) is True
+    # Provider-scoped: matches the store the pause names…
+    assert is_login_pause(_SIGNIN_REASON, "costco") is True
+    # …and rejects a different store, so an Amazon probe can't clear a Costco pause.
+    assert is_login_pause(_SIGNIN_REASON, "amazon") is False
+
+
+def test_is_login_pause_rejects_operator_gated_reasons() -> None:
+    # These pauses require a human — never auto-clear them.
+    for reason in (
+        "⚠️ Costco challenge on the product page — worker paused, clear it manually",
+        "⚠️ 1 order(s) were interrupted by a restart (paper_towels) — review, then resume",
+        "worker crashed on row 7",
+        "⛔ recorded 24h spend $310.00 is over the $300.00 cap",
+        "paused via CLI",
+        "",
+    ):
+        assert is_login_pause(reason) is False
+        assert is_login_pause(reason, "costco") is False

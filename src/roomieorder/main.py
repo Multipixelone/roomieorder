@@ -35,7 +35,7 @@ from roomieorder.orchestrator import Orchestrator
 from roomieorder.purchase import PurchaseResult, build_purchaser
 from roomieorder.retention import prune_shots
 from roomieorder.sheets import SheetsClient, build_sheets
-from roomieorder.store import QueueRow, Store
+from roomieorder.store import QueueRow, Store, is_login_pause
 
 _logger = logging.getLogger(__name__)
 
@@ -270,6 +270,32 @@ class Engine:
                     f"`roomieorder login --provider {provider}` before the next order"
                 )
                 _logger.warning("%s session probe: logged OUT", provider)
+                continue
+            # Log the healthy outcome too (the negative branch alone left a silent
+            # probe with no journal trail — a live session was indistinguishable
+            # from a probe that never ran). Then self-heal: a transient sign-in
+            # wall can latch a pause that outlives the condition, so once the
+            # profile reloads signed in, clear a matching login pause.
+            _logger.info("%s session probe: logged in", provider)
+            self._resume_if_login_pause(provider)
+
+    def _resume_if_login_pause(self, provider: str) -> None:
+        """Clear a login/session pause once ``provider`` is confirmed signed in.
+
+        Deliberately narrow: only a pause raised by *that* store's sign-in wall
+        (``store.is_login_pause``) is auto-cleared — a captcha ``challenge``, a
+        ``needs_review`` restart pause, a worker crash, a spend cap or a manual CLI
+        pause all stay latched for the operator. Auto-resume can re-arm real
+        ordering when ``DRY_RUN`` is off, so the gate is intentionally strict."""
+        if not self.store.is_paused():
+            return
+        if not is_login_pause(self.store.pause_reason(), provider):
+            return
+        self.store.set_paused(False)
+        self.notifier.send(
+            f"✅ {provider.capitalize()} session re-established — worker resumed"
+        )
+        _logger.info("worker resumed: %s session re-established", provider)
 
     # ─────────── per-row processing ───────────
 

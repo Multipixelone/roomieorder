@@ -3,14 +3,18 @@ from __future__ import annotations
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from fastapi.testclient import TestClient
 
+if TYPE_CHECKING:
+    from roomieorder.main import Engine
+
 from roomieorder.catalog import CatalogItem
 from roomieorder.config import Config
 from roomieorder.purchase import PurchaseResult
-from roomieorder.store import Status, Store
+from roomieorder.store import LOGIN_PAUSE_MARKER, Status, Store
 
 
 class FakeOrchestrator:
@@ -424,6 +428,91 @@ def test_session_check_notifies_only_logged_out_provider(
         engine._session_check_tick(now=1_000_000.0)
         assert any("Costco session looks logged out" in s for s in rec.sent)
         assert not any("Amazon" in s for s in rec.sent)
+    finally:
+        engine.store.close()
+
+
+def _signin_reason(provider: str) -> str:
+    """The pause reason a sign-in wall latches, built from the shared marker."""
+    return (
+        f"⚠️ {provider.capitalize()} is logged out (hit the sign-in wall on the "
+        f"product page) — run `{LOGIN_PAUSE_MARKER} {provider}`, then retry"
+    )
+
+
+def _logged_in_engine(
+    config: Config, monkeypatch: pytest.MonkeyPatch, *, signed_in: set[str]
+) -> "Engine":
+    """An Engine whose session probe reports ``signed_in`` providers as logged in,
+    with the activity gate forced clear and both profiles present."""
+    from roomieorder.main import Engine
+
+    class _FakePurchaser:
+        def __init__(self, provider: str) -> None:
+            self._provider = provider
+
+        def verify_session(self) -> bool:
+            return self._provider in signed_in
+
+    monkeypatch.setattr(
+        "roomieorder.main.build_purchaser",
+        lambda cfg, provider: _FakePurchaser(provider),
+    )
+    monkeypatch.setattr("roomieorder.main.activity.busy_gate", lambda cfg: None)
+    engine = Engine(config.model_copy(update={"session_check_hours": 24.0}))
+    engine.notifier = _RecordingNotifier()
+    return engine
+
+
+def test_session_check_resumes_login_pause_when_signed_in(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sign-in-wall pause that outlived its cause is auto-cleared once the probe
+    confirms the profile reloads signed in — the self-healing fix for a latched
+    'Costco is logged out' that no code path otherwise resets."""
+    config.costco_profile_dir.mkdir(parents=True)
+    config.amazon_profile_dir.mkdir(parents=True)
+    engine = _logged_in_engine(config, monkeypatch, signed_in={"costco", "amazon"})
+    try:
+        engine.store.set_paused(True, _signin_reason("costco"))
+        engine._session_check_tick(now=1_000_000.0)
+        assert engine.store.is_paused() is False
+        sent = cast(_RecordingNotifier, engine.notifier).sent
+        assert any("worker resumed" in s for s in sent)
+    finally:
+        engine.store.close()
+
+
+def test_session_check_keeps_challenge_pause_latched(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A captcha challenge needs a human — a logged-in probe must NOT auto-resume
+    it, even though the profile reads signed in."""
+    config.costco_profile_dir.mkdir(parents=True)
+    config.amazon_profile_dir.mkdir(parents=True)
+    engine = _logged_in_engine(config, monkeypatch, signed_in={"costco", "amazon"})
+    try:
+        engine.store.set_paused(
+            True, "⚠️ Costco challenge on the product page — worker paused, clear it manually"
+        )
+        engine._session_check_tick(now=1_000_000.0)
+        assert engine.store.is_paused() is True
+    finally:
+        engine.store.close()
+
+
+def test_session_check_wont_resume_other_store_pause(
+    config: Config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A signed-in Amazon probe must not clear a pause raised for a still-walled
+    Costco — the resume is provider-scoped."""
+    # Only amazon present, so only its probe runs; costco stays walled.
+    config.amazon_profile_dir.mkdir(parents=True)
+    engine = _logged_in_engine(config, monkeypatch, signed_in={"amazon"})
+    try:
+        engine.store.set_paused(True, _signin_reason("costco"))
+        engine._session_check_tick(now=1_000_000.0)
+        assert engine.store.is_paused() is True
     finally:
         engine.store.close()
 

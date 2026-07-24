@@ -52,6 +52,31 @@ SPEND_STATUSES = ("placed",)
 # hand it to the operator instead (see ``recover_stale`` and ``claim_next_pending``).
 MAX_ATTEMPTS = 1
 
+# Marker embedded in a worker-pause reason raised because a store profile got
+# bounced to the sign-in wall (``purchase.BasePurchaser._signin_required``). It is
+# the literal remediation command in that message, and the pause_reason string is
+# the *only* thing a pause carries in ``worker_state`` — so it is also how an
+# automated login/session recovery recognises a pause it is allowed to clear. A
+# captcha ``challenge``, a ``needs_review`` restart pause, a worker crash, a spend
+# cap and a manual CLI pause all lack this marker and stay operator-gated.
+# ``_signin_required`` builds its message around this constant; keep them in
+# lockstep so a re-worded message can't silently break auto-resume.
+LOGIN_PAUSE_MARKER = "roomieorder login --provider"
+
+
+def is_login_pause(reason: str, provider: Optional[str] = None) -> bool:
+    """True when ``reason`` is a logged-out sign-in-wall pause — the only pause an
+    automated login/session recovery may clear.
+
+    Pass ``provider`` to additionally require the pause be about *that* store, so a
+    successful Amazon probe never clears a pause raised for a still-walled Costco
+    (the reason renders ``... --provider <store> ...``). Everything else — a
+    captcha ``challenge``, a ``needs_review`` restart pause, a crash, a spend cap,
+    a manual pause — lacks the marker and returns False, staying operator-gated.
+    """
+    marker = LOGIN_PAUSE_MARKER if provider is None else f"{LOGIN_PAUSE_MARKER} {provider}"
+    return marker in reason
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
